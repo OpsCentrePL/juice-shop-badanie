@@ -9,12 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl=7.64.0-4+deb10u1 || apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package*.json ./
+# Najpierw kopiujemy całe źródło projektu (w tym folder frontend)
+COPY . .
+
+# Teraz npm install poprawnie odnajdzie katalog frontend w postinstall
 RUN npm install --omit=dev
+
 # CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
 RUN npm install lodash@4.17.15 --no-save
 
-COPY . .
 EXPOSE 3000
 # CNT-04 | CWE-250: brak instrukcji USER - proces dziala jako root
 CMD ["npm", "start"]
