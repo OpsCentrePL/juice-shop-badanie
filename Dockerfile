@@ -50,10 +50,10 @@
   # Przelacznik --unsafe-perm jest wymagany, poniewaz proces budowania uruchamiany
   # jest z uprawnieniami uzytkownika uprzywilejowanego (patrz CNT-04).
   # -----------------------------------------------------------------------------
-  COPY package*.json ./
+  COPY . .
   RUN npm install --omit=dev --unsafe-perm --no-audit --no-fund
   
-  COPY . .
+  
   RUN npm run build
   
   # -----------------------------------------------------------------------------
