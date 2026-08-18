@@ -40,9 +40,20 @@ wdrozenie:
     name: bitnami/kubectl
     entrypoint: ["/bin/sh"]
   needs: [obraz]
+  variables:
+    VAULT_AUTH_ROLE: badanie-potok
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "$VAULT_SERVER_URL"
+  secrets:
+    KUBECONFIG_PRODUKCJA:
+      vault: badanie/kubernetes/kubeconfig@kv
+      token: $VAULT_ID_TOKEN
+      file: true
   environment:
     name: badanie/kontrolny
     url: https://$APLIKACJA_HOST
   script:
+    - export KUBECONFIG="$KUBECONFIG_PRODUKCJA"
     - kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
     - kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
