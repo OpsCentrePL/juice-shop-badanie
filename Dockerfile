@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm intall --omit=dev
 # CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
 RUN npm install lodash@4.17.15 --no-save
 
