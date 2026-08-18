@@ -38,7 +38,7 @@ wdrozenie:
   stage: wdrozenie
   image: 
     name: bitnami/kubectl
-    entrypoint: ["/bin/sh"]
+    entrypoint: [""]
   needs: [obraz]
   variables:
     VAULT_AUTH_ROLE: badanie-potok
