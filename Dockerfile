@@ -51,7 +51,7 @@
   # jest z uprawnieniami uzytkownika uprzywilejowanego (patrz CNT-04).
   # -----------------------------------------------------------------------------
   COPY . .
-  RUN npm install --omit=dev --unsafe-perm --no-audit --no-fund
+  RUN npm install --unsafe-perm --no-audit --no-fund
   
   
   RUN npm run build
