@@ -1,7 +1,61 @@
-include:
-  - template: Auto-DevOps.gitlab-ci.yml
+# =============================================================================
+# WARIANT K (kontrolny) - potok bazowy bez zadnych kontroli bezpieczenstwa.
+# Cel pomiarowy: wyznaczenie bazowego czasu wykonania procesu (grupa W2),
+# wzgledem ktorego obliczany jest narzut czasowy bezpieczenstwa.
+# Zakres funkcjonalny identyczny z wariantami N i R: budowanie, obraz, wdrozenie.
+# =============================================================================
+
+default:
+  tags:
+    - docker
 
 variables:
-  SAST_EXCLUDED_PATHS: "frontend/src/assets/private/**"
-  TEST_DISABLED: "true"
-  DAST_DISABLED: "true"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
+  ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
+  # Buforowanie zalezosci wylaczone celowo - zapewnia porownywalnosc pomiarow
+  # czasowych miedzy wariantami (podrozdzial 5.8 pracy).
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
+
+stages:
+  - budowanie
+  - obraz
+  - wdrozenie
+
+# -----------------------------------------------------------------------------
+budowanie:
+  stage: budowanie
+  image: node:20-bookworm
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run build
+  artifacts:
+    paths:
+      - build/
+      - node_modules/
+    expire_in: 1 day
+
+# -----------------------------------------------------------------------------
+obraz:
+  stage: obraz
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs: [budowanie]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$OBRAZ:$ZNACZNIK" .
+    - docker push "$OBRAZ:$ZNACZNIK"
+
+# -----------------------------------------------------------------------------
+wdrozenie:
+  stage: wdrozenie
+  image: bitnami/kubectl:1.31
+  needs: [obraz]
+  environment:
+    name: badanie/kontrolny
+    url: https://$APLIKACJA_HOST
+  script:
+    - kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
+    - kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
