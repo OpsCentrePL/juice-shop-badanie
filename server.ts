@@ -130,6 +130,25 @@ import { ensureFileIsPassed, handleZipFileUpload, checkUploadSize, checkFileType
 const app = express()
 const server = new http.Server(app)
 
+
+import { queryReport } from './routes/research/queryReport'
+import { renderProfile } from './routes/research/renderProfile'
+import { archiveTool } from './routes/research/archiveTool'
+import { fileFetch } from './routes/research/fileFetch'
+import { sessionStore } from './routes/research/sessionStore'
+import { legacyCrypto } from './routes/research/legacyCrypto'
+import { urlPreview } from './routes/research/urlPreview'
+import { redirectHandler } from './routes/research/redirectHandler'
+app.get('/badanie/raport', queryReport())
+app.get('/badanie/profil', renderProfile())
+app.get('/badanie/archiwum', archiveTool())
+app.get('/badanie/plik', fileFetch())
+app.post('/badanie/sesja', sessionStore())
+app.post('/badanie/skrot', legacyCrypto())
+app.get('/badanie/podglad', urlPreview())
+app.get('/badanie/przekieruj', redirectHandler())
+
+
 // errorhandler requires us from overwriting a string property on it's module which is a big no-no with esmodules :/
 
 const errorhandler = require('errorhandler')

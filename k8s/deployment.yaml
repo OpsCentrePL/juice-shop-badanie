@@ -1,0 +1,26 @@
+# DEFEKTY IAC-01, IAC-02, IAC-03 | oczekiwana faza 5
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juice-shop
+  labels: { app: juice-shop }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: juice-shop }
+  template:
+    metadata:
+      labels: { app: juice-shop }
+    spec:
+      # IAC-02 | CWE-668: wspoldzielenie przestrzeni sieciowej wezla
+      hostNetwork: true
+      containers:
+        - name: juice-shop
+          image: registry.badanie.local/juice-shop:latest
+          ports: [{ containerPort: 3000 }]
+          securityContext:
+            # IAC-01 | CWE-250: kontener uprzywilejowany
+            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+          # IAC-03 | CWE-770: brak sekcji resources.limits

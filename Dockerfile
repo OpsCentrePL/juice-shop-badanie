@@ -1,41 +1,20 @@
-FROM node:24 AS installer
-COPY . /juice-shop
-WORKDIR /juice-shop
-RUN npm install -g typescript@^6.0.3
-RUN npm install --omit=dev
-RUN npm dedupe --omit=dev
-RUN rm -rf frontend/node_modules
-RUN rm -rf frontend/.angular
-RUN rm -rf frontend/src/assets
-RUN mkdir logs
-RUN chown -R 65532 logs
-RUN chgrp -R 0 ftp/ frontend/dist/ logs/ data/ i18n/
-RUN chmod -R g=u ftp/ frontend/dist/ logs/ data/ i18n/
-RUN rm ftp/legal.md || true
-RUN rm i18n/*.json || true
+# DEFEKTY CNT-01, CNT-02, CNT-03, CNT-04, CNT-05 | oczekiwana faza 5
+# CNT-01 | CWE-1104: przestarzaly obraz bazowy
+# CNT-05 | CWE-1357: brak przypiecia do skrotu warstwy (tag zamiast digest)
+FROM node:14-buster
 
-# keep version in sync with package.json
-ARG CYCLONEDX_NPM_VERSION='^2.0.0||^3.0.0||^4.0.0'
-RUN npm install -g @cyclonedx/cyclonedx-npm@$CYCLONEDX_NPM_VERSION
-RUN npm run sbom
+WORKDIR /opt/juice-shop
+# CNT-02 | CWE-1395: pakiety systemowe o znanych podatnosciach
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl=7.64.0-4+deb10u1 || apt-get install -y curl \
+    && rm -rf /var/lib/apt/lists/*
 
-FROM gcr.io/distroless/nodejs24-debian13
-ARG BUILD_DATE
-ARG VCS_REF
-LABEL maintainer="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.title="OWASP Juice Shop" \
-    org.opencontainers.image.description="Probably the most modern and sophisticated insecure web application" \
-    org.opencontainers.image.authors="Bjoern Kimminich <bjoern.kimminich@owasp.org>" \
-    org.opencontainers.image.vendor="Open Worldwide Application Security Project" \
-    org.opencontainers.image.documentation="https://help.owasp-juice.shop" \
-    org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.version="20.2.0" \
-    org.opencontainers.image.url="https://owasp-juice.shop" \
-    org.opencontainers.image.source="https://github.com/juice-shop/juice-shop" \
-    org.opencontainers.image.revision=$VCS_REF \
-    org.opencontainers.image.created=$BUILD_DATE
-WORKDIR /juice-shop
-COPY --from=installer --chown=65532:0 /juice-shop .
-USER 65532
+COPY package*.json ./
+RUN npm ci --omit=dev
+# CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
+RUN npm install lodash@4.17.15 --no-save
+
+COPY . .
 EXPOSE 3000
-CMD ["/juice-shop/build/app.js"]
+# CNT-04 | CWE-250: brak instrukcji USER - proces dziala jako root
+CMD ["npm", "start"]
