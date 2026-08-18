@@ -19,22 +19,8 @@ variables:
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
 
 stages:
-  - budowanie
   - obraz
   - wdrozenie
-
-# -----------------------------------------------------------------------------
-budowanie:
-  stage: budowanie
-  image: node:22-bookworm
-  script:
-    - npm install --no-audit --no-fund
-    - npm run build
-  artifacts:
-    paths:
-      - build/
-      - node_modules/
-    expire_in: 1 day
 
 # -----------------------------------------------------------------------------
 obraz:
@@ -45,7 +31,7 @@ obraz:
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
-  needs: [budowanie]
+  needs: []
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker build -t "$OBRAZ:$ZNACZNIK" .
