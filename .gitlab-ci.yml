@@ -26,7 +26,7 @@ stages:
 # -----------------------------------------------------------------------------
 budowanie:
   stage: budowanie
-  image: node:20-bookworm
+  image: node:22-bookworm
   script:
     - npm install --no-audit --no-fund
     - npm run build
