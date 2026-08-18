@@ -36,7 +36,7 @@ obraz:
 # -----------------------------------------------------------------------------
 wdrozenie:
   stage: wdrozenie
-  image: bitnami/kubectl:1.31
+  image: bitnami/kubectl
   needs: [obraz]
   environment:
     name: badanie/kontrolny
