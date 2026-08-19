@@ -1,13 +1,6 @@
 # =============================================================================
 # WARIANT N (natywny) - potok wykorzystujacy WYLACZNIE mechanizmy spelniajace
-# definicje mechanizmu natywnego z podrozdzialu 5.2 pracy:
-#   1) dostepne w ofercie producenta bez komponentu spoza tej oferty,
-#   2) konfigurowane szablonem/przelacznikiem platformy,
-#   3) utrzymywane i aktualizowane przez producenta,
-#   4) raportujace do natywnego interfejsu zarzadzania podatnosciami.
-#
-# Zaden krok NIE moze wprowadzac narzedzia spoza katalogu GitLab.
-# Kwalifikacja kazdego mechanizmu: zalacznik B (karta kwalifikacji).
+# definicje mechanizmu natywnego z podrozdzialu 5.2 pracy
 # =============================================================================
 
 include:
@@ -24,18 +17,17 @@ default:
 
 variables:
   DOCKER_DRIVER: overlay2
-  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_CERTDIR: ""
   OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
   ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
+  VAULT_AUTH_ROLE: badanie-potok
 
   # --- statyczna analiza kodu (klasa: sast) --------------------------------
-  # Advanced SAST: analiza miedzyplikowa i miedzyfunkcyjna (Ultimate).
   GITLAB_ADVANCED_SAST_ENABLED: 'true'
   SAST_EXCLUDED_PATHS: "test,tests,spec,node_modules,build"
 
   # --- wykrywanie sekretow (klasa: sekrety) --------------------------------
-  # Pelna historia repozytorium - wymagane do wykrycia defektu SEC-05.
   SECRET_DETECTION_HISTORIC_SCAN: 'true'
 
   # --- skanowanie obrazu (klasa: kontenery) --------------------------------
@@ -43,13 +35,26 @@ variables:
   CS_DOCKERFILE_PATH: "Dockerfile"
 
   # --- dynamiczne testowanie (klasa: dast) ---------------------------------
-  # Adres srodowiska efemerycznego, tworzonego na czas pojedynczego uruchomienia
-  # (faza 6 modelu z Tabeli 5.2 - weryfikacja przedwdrozeniowa, nie eksploatacja).
-  DAST_TARGET_URL: "http://juice-shop-$CI_PIPELINE_ID.$K8S_NAMESPACE_EFEMERYCZNY.svc.cluster.local:3000"
+  DAST_TARGET_URL: "https://owasp-$CI_PIPELINE_ID.opscentre.pl"
 
   # --- proweniencja artefaktow (grupa W5) ----------------------------------
-  # GitLab Runner generuje metadane pochodzenia zgodne z modelem SLSA.
   RUNNER_GENERATE_ARTIFACTS_METADATA: 'true'
+
+# Szablon pobierania i konfiguracji KUBECONFIG z HashiCorp Vault
+.k8s_vault:
+  image:
+    name: bitnami/kubectl
+    entrypoint: [""]
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "$VAULT_SERVER_URL"
+  secrets:
+    KUBECONFIG_PRODUKCJA:
+      vault: badanie/kubernetes/kubeconfig@kv
+      token: $VAULT_ID_TOKEN
+      file: true
+  before_script:
+    - export KUBECONFIG="$KUBECONFIG_PRODUKCJA"
 
 stages:
   - budowanie
@@ -63,9 +68,10 @@ stages:
 # -----------------------------------------------------------------------------
 budowanie:
   stage: budowanie
-  image: node:20-bookworm
+  image: node:22
+  needs: []
   script:
-    - npm ci --no-audit --no-fund
+    - npm install --no-audit --no-fund
     - npm run build
   artifacts:
     paths:
@@ -73,10 +79,6 @@ budowanie:
       - node_modules/
     expire_in: 1 day
 
-# -----------------------------------------------------------------------------
-# Zadania analiz natywnych uruchamiane sa przez dolaczone szablony.
-# Ponizej wylacznie przypisanie ich do etapow oraz wymuszenie uruchomienia
-# rowniez w potokach galezi (domyslnie czesc analiz dziala tylko na MR).
 # -----------------------------------------------------------------------------
 sast:
   stage: test
@@ -99,11 +101,13 @@ dependency-scanning:
   needs: [budowanie]
 
 # -----------------------------------------------------------------------------
+# Budowanie obrazu bez sekcji services (bezposrednie uzycie gniazda dockera)
+# -----------------------------------------------------------------------------
 obraz:
   stage: obraz
-  image: docker:27
-  services:
-    - docker:27-dind
+  image: docker:27-dind
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
   needs: [budowanie]
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
@@ -119,49 +123,84 @@ container_scanning:
   needs: [obraz]
 
 # -----------------------------------------------------------------------------
-# Srodowisko efemeryczne dla weryfikacji przedwdrozeniowej (faza 6).
-# Tworzone na czas jednego uruchomienia potoku i usuwane po jego zakonczeniu.
+# Srodowisko efemeryczne (host: owasp-$CI_PIPELINE_ID.opscentre.pl)
 # -----------------------------------------------------------------------------
 srodowisko-efemeryczne:
+  extends: .k8s_vault
   stage: srodowisko-efemeryczne
-  image: bitnami/kubectl:1.31
   needs: [obraz]
   environment:
     name: badanie/efemeryczne-$CI_PIPELINE_ID
-    url: http://juice-shop-$CI_PIPELINE_ID.$K8S_NAMESPACE_EFEMERYCZNY.svc.cluster.local:3000
+    url: https://owasp-$CI_PIPELINE_ID.opscentre.pl
     on_stop: usun-srodowisko-efemeryczne
     auto_stop_in: 1 hour
   script:
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" create deployment "juice-shop-$CI_PIPELINE_ID" --image="$OBRAZ:$ZNACZNIK"
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" patch deployment "juice-shop-$CI_PIPELINE_ID" --type='json' -p='[{"op":"add","path":"/spec/template/spec/imagePullSecrets","value":[{"name":"gitlab-registry-secret"}]}]'
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" expose deployment "juice-shop-$CI_PIPELINE_ID" --port=3000
+    - |
+      kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" apply -f - <<EOF
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: juice-shop-ephemeral-$CI_PIPELINE_ID
+        annotations:
+          nginx.ingress.kubernetes.io/backend-protocol: HTTP
+          nginx.ingress.kubernetes.io/ssl-redirect: "true"
+          nginx.ingress.kubernetes.io/configuration-snippet: |
+            add_header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet" always;
+            location = /robots.txt {
+              return 200 "User-agent: *\\nDisallow: /\\n";
+            }
+      spec:
+        ingressClassName: nginx
+        tls:
+        - hosts:
+          - "owasp-$CI_PIPELINE_ID.opscentre.pl"
+          secretName: opscentre-wildcard-tls
+        rules:
+        - host: "owasp-$CI_PIPELINE_ID.opscentre.pl"
+          http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: "juice-shop-$CI_PIPELINE_ID"
+                  port:
+                    number: 3000
+      EOF
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "juice-shop-$CI_PIPELINE_ID" --timeout=180s
 
-usun-srodowisko-efemeryczne:
-  stage: sprzatanie
-  image: bitnami/kubectl:1.31
-  needs: [dast]
-  when: always
-  environment:
-    name: badanie/efemeryczne-$CI_PIPELINE_ID
-    action: stop
-  script:
-    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
-    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
-
+# -----------------------------------------------------------------------------
+# Dynamiczne testowanie bezpieczenstwa (DAST)
+# -----------------------------------------------------------------------------
 dast:
   stage: dast
   needs: [srodowisko-efemeryczne]
 
 # -----------------------------------------------------------------------------
-# Wdrozenie produkcyjne. W wariancie N brak weryfikacji podpisu przy dopuszczeniu
-# zasobu do klastra - GitLab nie udostepnia natywnego mechanizmu kontroli
-# dopuszczenia po stronie Kubernetes (ustalenie istotne dla defektow INT-01/INT-02).
+# Sprzatanie po zakonczonym DAST
+# -----------------------------------------------------------------------------
+usun-srodowisko-efemeryczne:
+  extends: .k8s_vault
+  stage: sprzatanie
+  when: always
+  environment:
+    name: badanie/efemeryczne-$CI_PIPELINE_ID
+    action: stop
+  script:
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete ingress "juice-shop-ephemeral-$CI_PIPELINE_ID" --ignore-not-found
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
+
+# -----------------------------------------------------------------------------
+# Wdrozenie produkcyjne
 # -----------------------------------------------------------------------------
 wdrozenie:
+  extends: .k8s_vault
   stage: wdrozenie
-  image: bitnami/kubectl:1.31
   needs: [dast, container_scanning]
-  when: manual
   environment:
     name: badanie/natywny
     url: https://$APLIKACJA_HOST
