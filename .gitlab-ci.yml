@@ -43,7 +43,7 @@ variables:
 # Szablon pobierania i konfiguracji KUBECONFIG z HashiCorp Vault
 .k8s_vault:
   image:
-    name: bitnami/kubectl:1.31
+    name: bitnami/kubectl
     entrypoint: [""]
   id_tokens:
     VAULT_ID_TOKEN:
