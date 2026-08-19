@@ -1,5 +1,5 @@
 # =============================================================================
-# WARIANT N (natywny) - potok z dynamicznym srodowiskiem efemerycznym
+# WARIANT N (natywny) - potok z dynamicznym srodowiskiem efemerycznym i Vault
 # =============================================================================
 
 include:
@@ -20,6 +20,7 @@ variables:
   OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
   ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
+  VAULT_AUTH_ROLE: badanie-potok
 
   # --- statyczna analiza kodu (klasa: sast) --------------------------------
   GITLAB_ADVANCED_SAST_ENABLED: 'true'
@@ -37,6 +38,22 @@ variables:
 
   # --- proweniencja artefaktow (grupa W5) ----------------------------------
   RUNNER_GENERATE_ARTIFACTS_METADATA: 'true'
+
+# Szablon uwierzytelniania w HashiCorp Vault dla zadan k8s
+.k8s_vault:
+  image:
+    name: bitnami/kubectl
+    entrypoint: [""]
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "$VAULT_SERVER_URL"
+  secrets:
+    KUBECONFIG_PRODUKCJA:
+      vault: badanie/kubernetes/kubeconfig@kv
+      token: $VAULT_ID_TOKEN
+      file: true
+  before_script:
+    - export KUBECONFIG="$KUBECONFIG_PRODUKCJA"
 
 stages:
   - budowanie
@@ -106,10 +123,8 @@ container_scanning:
 # Srodowisko efemeryczne (host: owasp-$CI_PIPELINE_ID.opscentre.pl)
 # -----------------------------------------------------------------------------
 srodowisko-efemeryczne:
+  extends: .k8s_vault
   stage: srodowisko-efemeryczne
-  image:
-    name: bitnami/kubectl
-    entrypoint: [""]
   needs: [obraz]
   environment:
     name: badanie/efemeryczne-$CI_PIPELINE_ID
@@ -155,10 +170,8 @@ srodowisko-efemeryczne:
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "juice-shop-$CI_PIPELINE_ID" --timeout=180s
 
 usun-srodowisko-efemeryczne:
+  extends: .k8s_vault
   stage: sprzatanie
-  image:
-    name: bitnami/kubectl
-    entrypoint: [""]
   needs: [dast]
   when: always
   environment:
@@ -177,10 +190,8 @@ dast:
 # Wdrozenie produkcyjne
 # -----------------------------------------------------------------------------
 wdrozenie:
+  extends: .k8s_vault
   stage: wdrozenie
-  image:
-    name: bitnami/kubectl
-    entrypoint: [""]
   needs: [dast, container_scanning]
   when: manual
   environment:
