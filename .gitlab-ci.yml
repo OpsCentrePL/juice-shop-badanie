@@ -1,9 +1,22 @@
 # =============================================================================
-# WARIANT K (kontrolny) - potok bazowy bez zadnych kontroli bezpieczenstwa.
-# Cel pomiarowy: wyznaczenie bazowego czasu wykonania procesu (grupa W2),
-# wzgledem ktorego obliczany jest narzut czasowy bezpieczenstwa.
-# Zakres funkcjonalny identyczny z wariantami N i R: budowanie, obraz, wdrozenie.
+# WARIANT N (natywny) - potok wykorzystujacy WYLACZNIE mechanizmy spelniajace
+# definicje mechanizmu natywnego z podrozdzialu 5.2 pracy:
+#   1) dostepne w ofercie producenta bez komponentu spoza tej oferty,
+#   2) konfigurowane szablonem/przelacznikiem platformy,
+#   3) utrzymywane i aktualizowane przez producenta,
+#   4) raportujace do natywnego interfejsu zarzadzania podatnosciami.
+#
+# Zaden krok NIE moze wprowadzac narzedzia spoza katalogu GitLab.
+# Kwalifikacja kazdego mechanizmu: zalacznik B (karta kwalifikacji).
 # =============================================================================
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/SAST-IaC.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.v2.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Security/DAST.gitlab-ci.yml
 
 default:
   tags:
@@ -11,49 +24,147 @@ default:
 
 variables:
   DOCKER_DRIVER: overlay2
-  DOCKER_HOST: unix:///var/run/docker.sock
   DOCKER_TLS_CERTDIR: "/certs"
   OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
   ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
-  # Buforowanie zalezosci wylaczone celowo - zapewnia porownywalnosc pomiarow
-  # czasowych miedzy wariantami (podrozdzial 5.8 pracy).
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
 
+  # --- statyczna analiza kodu (klasa: sast) --------------------------------
+  # Advanced SAST: analiza miedzyplikowa i miedzyfunkcyjna (Ultimate).
+  GITLAB_ADVANCED_SAST_ENABLED: 'true'
+  SAST_EXCLUDED_PATHS: "test,tests,spec,node_modules,build"
+
+  # --- wykrywanie sekretow (klasa: sekrety) --------------------------------
+  # Pelna historia repozytorium - wymagane do wykrycia defektu SEC-05.
+  SECRET_DETECTION_HISTORIC_SCAN: 'true'
+
+  # --- skanowanie obrazu (klasa: kontenery) --------------------------------
+  CS_IMAGE: "$CI_REGISTRY_IMAGE/juice-shop:$CI_COMMIT_SHORT_SHA"
+  CS_DOCKERFILE_PATH: "Dockerfile"
+
+  # --- dynamiczne testowanie (klasa: dast) ---------------------------------
+  # Adres srodowiska efemerycznego, tworzonego na czas pojedynczego uruchomienia
+  # (faza 6 modelu z Tabeli 5.2 - weryfikacja przedwdrozeniowa, nie eksploatacja).
+  DAST_TARGET_URL: "http://juice-shop-$CI_PIPELINE_ID.$K8S_NAMESPACE_EFEMERYCZNY.svc.cluster.local:3000"
+
+  # --- proweniencja artefaktow (grupa W5) ----------------------------------
+  # GitLab Runner generuje metadane pochodzenia zgodne z modelem SLSA.
+  RUNNER_GENERATE_ARTIFACTS_METADATA: 'true'
+
 stages:
+  - budowanie
+  - test
   - obraz
+  - srodowisko-efemeryczne
+  - dast
+  - sprzatanie
   - wdrozenie
+
+# -----------------------------------------------------------------------------
+budowanie:
+  stage: budowanie
+  image: node:20-bookworm
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run build
+  artifacts:
+    paths:
+      - build/
+      - node_modules/
+    expire_in: 1 day
+
+# -----------------------------------------------------------------------------
+# Zadania analiz natywnych uruchamiane sa przez dolaczone szablony.
+# Ponizej wylacznie przypisanie ich do etapow oraz wymuszenie uruchomienia
+# rowniez w potokach galezi (domyslnie czesc analiz dziala tylko na MR).
+# -----------------------------------------------------------------------------
+sast:
+  stage: test
+  needs: []
+
+gitlab-advanced-sast:
+  stage: test
+  needs: []
+
+iac-sast:
+  stage: test
+  needs: []
+
+secret_detection:
+  stage: test
+  needs: []
+
+dependency-scanning:
+  stage: test
+  needs: [budowanie]
 
 # -----------------------------------------------------------------------------
 obraz:
   stage: obraz
-  image: docker:27-dind
-  needs: []
+  image: docker:27
+  services:
+    - docker:27-dind
+  needs: [budowanie]
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker build -t "$OBRAZ:$ZNACZNIK" .
     - docker push "$OBRAZ:$ZNACZNIK"
+  artifacts:
+    paths:
+      - artifacts-metadata.json
+    expire_in: 1 week
 
+container_scanning:
+  stage: obraz
+  needs: [obraz]
+
+# -----------------------------------------------------------------------------
+# Srodowisko efemeryczne dla weryfikacji przedwdrozeniowej (faza 6).
+# Tworzone na czas jednego uruchomienia potoku i usuwane po jego zakonczeniu.
+# -----------------------------------------------------------------------------
+srodowisko-efemeryczne:
+  stage: srodowisko-efemeryczne
+  image: bitnami/kubectl:1.31
+  needs: [obraz]
+  environment:
+    name: badanie/efemeryczne-$CI_PIPELINE_ID
+    url: http://juice-shop-$CI_PIPELINE_ID.$K8S_NAMESPACE_EFEMERYCZNY.svc.cluster.local:3000
+    on_stop: usun-srodowisko-efemeryczne
+    auto_stop_in: 1 hour
+  script:
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" create deployment "juice-shop-$CI_PIPELINE_ID" --image="$OBRAZ:$ZNACZNIK"
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" expose deployment "juice-shop-$CI_PIPELINE_ID" --port=3000
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "juice-shop-$CI_PIPELINE_ID" --timeout=180s
+
+usun-srodowisko-efemeryczne:
+  stage: sprzatanie
+  image: bitnami/kubectl:1.31
+  needs: [dast]
+  when: always
+  environment:
+    name: badanie/efemeryczne-$CI_PIPELINE_ID
+    action: stop
+  script:
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
+    - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
+
+dast:
+  stage: dast
+  needs: [srodowisko-efemeryczne]
+
+# -----------------------------------------------------------------------------
+# Wdrozenie produkcyjne. W wariancie N brak weryfikacji podpisu przy dopuszczeniu
+# zasobu do klastra - GitLab nie udostepnia natywnego mechanizmu kontroli
+# dopuszczenia po stronie Kubernetes (ustalenie istotne dla defektow INT-01/INT-02).
 # -----------------------------------------------------------------------------
 wdrozenie:
   stage: wdrozenie
-  image: 
-    name: bitnami/kubectl
-    entrypoint: [""]
-  needs: [obraz]
-  variables:
-    VAULT_AUTH_ROLE: badanie-potok
-  id_tokens:
-    VAULT_ID_TOKEN:
-      aud: "$VAULT_SERVER_URL"
-  secrets:
-    KUBECONFIG_PRODUKCJA:
-      vault: badanie/kubernetes/kubeconfig@kv
-      token: $VAULT_ID_TOKEN
-      file: true
+  image: bitnami/kubectl:1.31
+  needs: [dast, container_scanning]
+  when: manual
   environment:
-    name: badanie/kontrolny
+    name: badanie/natywny
     url: https://$APLIKACJA_HOST
   script:
-    - export KUBECONFIG="$KUBECONFIG_PRODUKCJA"
     - kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
     - kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
