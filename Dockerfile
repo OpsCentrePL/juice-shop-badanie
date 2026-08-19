@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl=7.64.0-4+deb10u1 || apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN npm install --omit=dev
+RUN npm install 
 # CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
 RUN npm install lodash@4.17.15 --no-save
 
