@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 RUN npm install 
 # CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
-RUN npm install lodash@4.17.15 --no-save
+RUN npm install node-serialize@0.0.4 --no-save --no-audit --no-fund
 
 
 EXPOSE 3000
