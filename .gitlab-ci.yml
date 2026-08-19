@@ -20,7 +20,12 @@ variables:
   OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
   ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
+
+  # --- magazyn poswiadczen (grupa W5) --------------------------------------
+  # Bez obu wartosci Vault odrzuca zadanie komunikatem "missing role"
+  # (rola domyslna nie jest zdefiniowana po stronie serwera).
   VAULT_AUTH_ROLE: badanie-potok
+  VAULT_AUTH_PATH: jwt
 
   # --- statyczna analiza kodu (klasa: sast) --------------------------------
   GITLAB_ADVANCED_SAST_ENABLED: 'true'
@@ -38,6 +43,15 @@ variables:
 
   # --- proweniencja artefaktow (grupa W5) ----------------------------------
   RUNNER_GENERATE_ARTIFACTS_METADATA: 'true'
+
+  # -----------------------------------------------------------------------
+  # SEC-04 | CWE-798 | faza 3
+  #   Token dostepu osadzony wprost w definicji potoku, a nie w chronionej
+  #   zmiennej CI/CD. Wartosc nigdzie w script: nie jest uzywana - Secret
+  #   Detection wykrywa ja przez samo wystapienie wzorca w tresci pliku,
+  #   niezaleznie od tego, czy token jest funkcjonalnie wykorzystywany.
+  # -----------------------------------------------------------------------
+  LEGACY_MONITORING_TOKEN: "glpat-a1B2c3D4e5F6g7H8i9J0"
 
 # Szablon uwierzytelniania w HashiCorp Vault dla zadan k8s
 .k8s_vault:
