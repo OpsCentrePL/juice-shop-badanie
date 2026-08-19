@@ -65,7 +65,7 @@ budowanie:
   stage: budowanie
   image: node:22
   script:
-    - npm ci --no-audit --no-fund
+    - npm install --no-audit --no-fund
     - npm run build
   artifacts:
     paths:
