@@ -63,7 +63,7 @@ stages:
 # -----------------------------------------------------------------------------
 budowanie:
   stage: budowanie
-  image: node:20-bookworm
+  image: node:22
   script:
     - npm ci --no-audit --no-fund
     - npm run build
@@ -124,7 +124,7 @@ container_scanning:
 # -----------------------------------------------------------------------------
 srodowisko-efemeryczne:
   stage: srodowisko-efemeryczne
-  image: bitnami/kubectl:1.31
+  image: bitnami/kubectl
   needs: [obraz]
   environment:
     name: badanie/efemeryczne-$CI_PIPELINE_ID
@@ -138,7 +138,7 @@ srodowisko-efemeryczne:
 
 usun-srodowisko-efemeryczne:
   stage: sprzatanie
-  image: bitnami/kubectl:1.31
+  image: bitnami/kubectl
   needs: [dast]
   when: always
   environment:
@@ -159,7 +159,7 @@ dast:
 # -----------------------------------------------------------------------------
 wdrozenie:
   stage: wdrozenie
-  image: bitnami/kubectl:1.31
+  image: bitnami/kubectl
   needs: [dast, container_scanning]
   when: manual
   environment:
