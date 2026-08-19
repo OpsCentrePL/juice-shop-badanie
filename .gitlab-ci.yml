@@ -1,6 +1,5 @@
 # =============================================================================
-# WARIANT N (natywny) - potok wykorzystujacy WYLACZNIE mechanizmy spelniajace
-# definicje mechanizmu natywnego z podrozdzialu 5.2 pracy
+# WARIANT N (natywny) - potok z dynamicznym srodowiskiem efemerycznym i Vault
 # =============================================================================
 
 include:
@@ -21,7 +20,12 @@ variables:
   OBRAZ: "$CI_REGISTRY_IMAGE/juice-shop"
   ZNACZNIK: "$CI_COMMIT_SHORT_SHA"
   NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm-nocache"
+
+  # --- magazyn poswiadczen (grupa W5) --------------------------------------
+  # Bez obu wartosci Vault odrzuca zadanie komunikatem "missing role"
+  # (rola domyslna nie jest zdefiniowana po stronie serwera).
   VAULT_AUTH_ROLE: badanie-potok
+  VAULT_AUTH_PATH: jwt
 
   # --- statyczna analiza kodu (klasa: sast) --------------------------------
   GITLAB_ADVANCED_SAST_ENABLED: 'true'
@@ -29,6 +33,12 @@ variables:
 
   # --- wykrywanie sekretow (klasa: sekrety) --------------------------------
   SECRET_DETECTION_HISTORIC_SCAN: 'true'
+  # Domyslny plytki checkout (GIT_DEPTH=20 z ustawien projektu) nie siegal
+  # commita SEC-05, oddalonego okolo 76-77 commitow od HEAD - historyczne
+  # skanowanie sekretow nie mialo fizycznego dostepu do tej czesci historii.
+  # Wartosc podniesiona, aby test mierzyl rzeczywista zdolnosc mechanizmu,
+  # a nie przypadkowe obciecie klonu.
+  GIT_DEPTH: "100"
 
   # --- skanowanie obrazu (klasa: kontenery) --------------------------------
   CS_IMAGE: "$CI_REGISTRY_IMAGE/juice-shop:$CI_COMMIT_SHORT_SHA"
@@ -40,7 +50,16 @@ variables:
   # --- proweniencja artefaktow (grupa W5) ----------------------------------
   RUNNER_GENERATE_ARTIFACTS_METADATA: 'true'
 
-# Szablon pobierania i konfiguracji KUBECONFIG z HashiCorp Vault
+  # -----------------------------------------------------------------------
+  # SEC-04 | CWE-798 | faza 3
+  #   Token dostepu osadzony wprost w definicji potoku, a nie w chronionej
+  #   zmiennej CI/CD. Wartosc nigdzie w script: nie jest uzywana - Secret
+  #   Detection wykrywa ja przez samo wystapienie wzorca w tresci pliku,
+  #   niezaleznie od tego, czy token jest funkcjonalnie wykorzystywany.
+  # -----------------------------------------------------------------------
+  LEGACY_MONITORING_TOKEN: "glpat-a1B2c3D4e5F6g7H8i9J0"
+
+# Szablon uwierzytelniania w HashiCorp Vault dla zadan k8s
 .k8s_vault:
   image:
     name: bitnami/kubectl
@@ -76,7 +95,7 @@ budowanie:
   artifacts:
     paths:
       - build/
-      - node_modules/
+      - frontend/dist/
     expire_in: 1 day
 
 # -----------------------------------------------------------------------------
@@ -88,7 +107,9 @@ gitlab-advanced-sast:
   stage: test
   needs: []
 
-iac-sast:
+# Nazwa rzeczywista zadania szablonu Security/SAST-IaC na tej instancji to
+# kics-iac-sast, nie iac-sast - potwierdzone przez GET /pipelines/:id/jobs.
+kics-iac-sast:
   stage: test
   needs: []
 
@@ -100,8 +121,6 @@ dependency-scanning:
   stage: test
   needs: [budowanie]
 
-# -----------------------------------------------------------------------------
-# Budowanie obrazu bez sekcji services (bezposrednie uzycie gniazda dockera)
 # -----------------------------------------------------------------------------
 obraz:
   stage: obraz
@@ -180,7 +199,7 @@ dast:
   needs: [srodowisko-efemeryczne]
 
 # -----------------------------------------------------------------------------
-# Sprzatanie po zakonczonym DAST
+# Sprzatanie po zakonczonym DAST (czeka na zakonczenie calego etapu dast)
 # -----------------------------------------------------------------------------
 usun-srodowisko-efemeryczne:
   extends: .k8s_vault
@@ -201,6 +220,7 @@ wdrozenie:
   extends: .k8s_vault
   stage: wdrozenie
   needs: [dast, container_scanning]
+  when: manual
   environment:
     name: badanie/natywny
     url: https://$APLIKACJA_HOST
