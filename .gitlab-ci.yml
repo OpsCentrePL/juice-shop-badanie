@@ -201,7 +201,6 @@ wdrozenie:
   extends: .k8s_vault
   stage: wdrozenie
   needs: [dast, container_scanning]
-  when: manual
   environment:
     name: badanie/natywny
     url: https://$APLIKACJA_HOST
