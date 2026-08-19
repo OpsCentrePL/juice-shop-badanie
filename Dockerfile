@@ -1,7 +1,7 @@
 # DEFEKTY CNT-01, CNT-02, CNT-03, CNT-04, CNT-05 | oczekiwana faza 5
 # CNT-01 | CWE-1104: przestarzaly obraz bazowy
 # CNT-05 | CWE-1357: brak przypiecia do skrotu warstwy (tag zamiast digest)
-FROM node:22
+FROM node:22.23
 
 WORKDIR /opt/juice-shop
 # CNT-02 | CWE-1395: pakiety systemowe o znanych podatnosciach
@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 RUN npm install 
 # CNT-03 | CWE-1395: zaleznosc jezykowa instalowana wylacznie w obrazie
-RUN npm install lodash@4.17.15 --no-save
+RUN npm install node-serialize@0.0.4 --no-save --no-audit --no-fund
 
 
 EXPOSE 3000
