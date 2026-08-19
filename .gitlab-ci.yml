@@ -87,7 +87,7 @@ stages:
 # -----------------------------------------------------------------------------
 budowanie:
   stage: budowanie
-  image: node:22.23
+  image: node:22
   needs: []
   script:
     - npm install --no-audit --no-fund
@@ -116,6 +116,13 @@ kics-iac-sast:
 secret_detection:
   stage: test
   needs: []
+  # Szablon .secret-analyzer (Jobs/Secret-Detection.gitlab-ci.yml) narzuca
+  # GIT_DEPTH: "50" na poziomie zadania (przez extends). Zmienna joba ma
+  # wyzszy priorytet niz globalna sekcja variables: powyzej, wiec samo
+  # ustawienie GIT_DEPTH globalnie nigdy nie docieralo do tego zadania -
+  # trzeba je nadpisac tutaj, na tym samym poziomie co szablon.
+  variables:
+    GIT_DEPTH: "100"
 
 dependency-scanning:
   stage: test
