@@ -169,10 +169,19 @@ srodowisko-efemeryczne:
       EOF
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "juice-shop-$CI_PIPELINE_ID" --timeout=180s
 
+# -----------------------------------------------------------------------------
+# Dynamiczne testowanie bezpieczenstwa (DAST)
+# -----------------------------------------------------------------------------
+dast:
+  stage: dast
+  needs: [srodowisko-efemeryczne]
+
+# -----------------------------------------------------------------------------
+# Sprzatanie po zakonczonym DAST (czeka na zakonczenie calego etapu dast)
+# -----------------------------------------------------------------------------
 usun-srodowisko-efemeryczne:
   extends: .k8s_vault
   stage: sprzatanie
-  needs: [dast]
   when: always
   environment:
     name: badanie/efemeryczne-$CI_PIPELINE_ID
@@ -181,10 +190,6 @@ usun-srodowisko-efemeryczne:
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete ingress "juice-shop-ephemeral-$CI_PIPELINE_ID" --ignore-not-found
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
     - kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "juice-shop-$CI_PIPELINE_ID" --ignore-not-found
-
-dast:
-  stage: dast
-  needs: [srodowisko-efemeryczne]
 
 # -----------------------------------------------------------------------------
 # Wdrozenie produkcyjne
