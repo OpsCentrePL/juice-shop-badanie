@@ -57,13 +57,13 @@ variables:
   WERSJA_TRIVY: "0.58.1"
   WERSJA_GITLEAKS: "8.22.1"
   WERSJA_SYFT: "1.19.0"
-  WERSJA_COSIGN: "2.4.1"
+  WERSJA_COSIGN: "v2.4.1"
   WERSJA_ZAP: "2.16.0"
 
 # Szablon uwierzytelniania w HashiCorp Vault dla zadan k8s
 .k8s_vault:
   image:
-    name: bitnami/kubectl:1.31
+    name: bitnami/kubectl
     entrypoint: [""]
   id_tokens:
     VAULT_ID_TOKEN:
