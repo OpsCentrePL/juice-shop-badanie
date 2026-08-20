@@ -222,7 +222,6 @@ sbom:
   stage: artefakt
   image: 
     name: anchore/syft:v$WERSJA_SYFT
-    entrypoint: [""]
   needs: [obraz]
   script:
     - syft "$OBRAZ:$ZNACZNIK" -o cyclonedx-json=sbom.cdx.json
