@@ -134,7 +134,9 @@ dependency-scanning:
 # =============================================================================
 semgrep-krzyzowy:
   stage: test-krzyzowy
-  image: returntocorp/semgrep:$WERSJA_SEMGREP
+  image: 
+    name: returntocorp/semgrep:$WERSJA_SEMGREP
+    entrypoint: [""]
   needs: []
   allow_failure: true
   script:
@@ -147,7 +149,9 @@ semgrep-krzyzowy:
 
 gitleaks-krzyzowy:
   stage: test-krzyzowy
-  image: zricethezav/gitleaks:v$WERSJA_GITLEAKS
+  image: 
+    name: zricethezav/gitleaks:v$WERSJA_GITLEAKS
+    entrypoint: [""]
   needs: []
   allow_failure: true
   variables:
@@ -161,7 +165,9 @@ gitleaks-krzyzowy:
 
 trivy-iac-krzyzowy:
   stage: test-krzyzowy
-  image: aquasec/trivy:$WERSJA_TRIVY
+  image: 
+    name: aquasec/trivy:$WERSJA_TRIVY
+    entrypoint: [""]
   needs: []
   allow_failure: true
   script:
@@ -197,7 +203,9 @@ container_scanning:
 
 trivy-obraz-krzyzowy:
   stage: obraz
-  image: aquasec/trivy:$WERSJA_TRIVY
+  image: 
+    name: aquasec/trivy:$WERSJA_TRIVY
+    entrypoint: [""]
   needs: [obraz]
   allow_failure: true
   script:
@@ -212,7 +220,9 @@ trivy-obraz-krzyzowy:
 # =============================================================================
 sbom:
   stage: artefakt
-  image: anchore/syft:v$WERSJA_SYFT
+  image: 
+    name: anchore/syft:v$WERSJA_SYFT
+    entrypoint: [""]
   needs: [obraz]
   script:
     - syft "$OBRAZ:$ZNACZNIK" -o cyclonedx-json=sbom.cdx.json
@@ -222,7 +232,9 @@ sbom:
 
 podpis:
   stage: artefakt
-  image: bitnami/cosign:$WERSJA_COSIGN
+  image: 
+    name: bitnami/cosign:$WERSJA_COSIGN
+    entrypoint: [""]
   needs: [obraz, sbom]
   id_tokens:
     SIGSTORE_ID_TOKEN:
@@ -292,7 +304,8 @@ dast:
 
 zap-krzyzowy:
   stage: dast
-  image: ghcr.io/zaproxy/zaproxy:$WERSJA_ZAP
+  image: 
+    name: ghcr.io/zaproxy/zaproxy:$WERSJA_ZAP
   needs: [srodowisko-efemeryczne]
   allow_failure: true
   script:
@@ -324,7 +337,9 @@ usun-srodowisko-efemeryczne:
 # =============================================================================
 brama-integralnosci:
   stage: weryfikacja
-  image: bitnami/cosign:$WERSJA_COSIGN
+  image: 
+    name: bitnami/cosign:$WERSJA_COSIGN
+    entrypoint: [""]
   needs: [podpis, container_scanning]
   script:
     - SKROT=$(cat skrot-obrazu.txt)
