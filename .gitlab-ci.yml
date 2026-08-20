@@ -220,13 +220,14 @@ trivy-obraz-krzyzowy:
 # =============================================================================
 sbom:
   stage: artefakt
-  image: 
-    name: anchore/syft:v$WERSJA_SYFT
+  image: alpine:3.20
   needs: [obraz]
   script:
+    - wget -qO- "https://github.com/anchore/syft/releases/download/v${WERSJA_SYFT}/syft_${WERSJA_SYFT}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin syft
     - syft "$OBRAZ:$ZNACZNIK" -o cyclonedx-json=sbom.cdx.json
   artifacts:
-    paths: [sbom.cdx.json]
+    paths:
+      - sbom.cdx.json
     expire_in: 1 month
 
 podpis:
