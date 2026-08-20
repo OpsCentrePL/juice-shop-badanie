@@ -57,7 +57,7 @@ variables:
   WERSJA_TRIVY: "0.58.1"
   WERSJA_GITLEAKS: "8.22.1"
   WERSJA_SYFT: "1.19.0"
-  WERSJA_COSIGN: "v2.4.1"
+  WERSJA_COSIGN: "2.4.1"
   WERSJA_ZAP: "2.16.0"
 
 # Szablon uwierzytelniania w HashiCorp Vault dla zadan k8s
@@ -232,13 +232,14 @@ sbom:
 
 podpis:
   stage: artefakt
-  image: 
-    name: bitnami/cosign:$WERSJA_COSIGN
-    entrypoint: [""]
+  image: alpine:3.20
   needs: [obraz, sbom]
   id_tokens:
     SIGSTORE_ID_TOKEN:
       aud: sigstore
+  before_script:
+    - wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v${WERSJA_COSIGN}/cosign-linux-amd64"
+    - chmod +x /usr/local/bin/cosign
   script:
     - SKROT=$(cat skrot-obrazu.txt)
     - cosign sign --yes "$SKROT"
@@ -306,6 +307,7 @@ zap-krzyzowy:
   stage: dast
   image: 
     name: ghcr.io/zaproxy/zaproxy:$WERSJA_ZAP
+    entrypoint: [""]
   needs: [srodowisko-efemeryczne]
   allow_failure: true
   script:
@@ -337,10 +339,11 @@ usun-srodowisko-efemeryczne:
 # =============================================================================
 brama-integralnosci:
   stage: weryfikacja
-  image: 
-    name: bitnami/cosign:$WERSJA_COSIGN
-    entrypoint: [""]
+  image: alpine:3.20
   needs: [podpis, container_scanning]
+  before_script:
+    - wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v${WERSJA_COSIGN}/cosign-linux-amd64"
+    - chmod +x /usr/local/bin/cosign
   script:
     - SKROT=$(cat skrot-obrazu.txt)
     - echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
