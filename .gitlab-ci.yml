@@ -235,16 +235,24 @@ podpis:
   image: alpine:3.20
   needs: [obraz, sbom]
   id_tokens:
-    SIGSTORE_ID_TOKEN:
-      aud: sigstore
+    VAULT_ID_TOKEN:
+      aud: "$VAULT_SERVER_URL"
+  secrets:
+    COSIGN_PRIVATE_KEY:
+      vault: badanie/cosign/key@kv
+      token: $VAULT_ID_TOKEN
+    COSIGN_PASSWORD:
+      vault: badanie/cosign/password@kv
+      token: $VAULT_ID_TOKEN
   before_script:
     - wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v${WERSJA_COSIGN}/cosign-linux-amd64"
     - chmod +x /usr/local/bin/cosign
   script:
     - SKROT=$(cat skrot-obrazu.txt)
-    - cosign sign --yes "$SKROT"
-    - cosign attest --yes --predicate sbom.cdx.json --type cyclonedx "$SKROT"
-    - cosign verify --certificate-identity-regexp ".*" --certificate-oidc-issuer "$CI_SERVER_URL" "$SKROT"
+    - echo "$CI_REGISTRY_PASSWORD" | cosign login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - cosign sign --key env://COSIGN_PRIVATE_KEY --yes "$SKROT"
+    - cosign attest --key env://COSIGN_PRIVATE_KEY --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
+    - cosign verify --key cosign.pub "$SKROT"
 
 # =============================================================================
 # SRODOWISKO EFEMERYCZNE
@@ -347,9 +355,9 @@ brama-integralnosci:
   script:
     - SKROT=$(cat skrot-obrazu.txt)
     - echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
-    - cosign verify --certificate-identity-regexp ".*" --certificate-oidc-issuer "$CI_SERVER_URL" "$SKROT"
+    - cosign verify --key cosign.pub "$SKROT"
     - echo "Weryfikacja atestacji zestawienia komponentow"
-    - cosign verify-attestation --type cyclonedx --certificate-identity-regexp ".*" --certificate-oidc-issuer "$CI_SERVER_URL" "$SKROT"
+    - cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
 
 # =============================================================================
 # WDROZENIE PRODUKCYJNE
