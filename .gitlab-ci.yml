@@ -87,7 +87,7 @@ stages:
 # -----------------------------------------------------------------------------
 budowanie:
   stage: budowanie
-  image: node:22:23
+  image: node:22.23
   needs: []
   script:
     - npm install --no-audit --no-fund
