@@ -87,18 +87,13 @@ jobs:
     container:
       image: node:22-bookworm
     steps:
-      - name: Zaloguj do GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generuj natywną atestację pochodzenia (build provenance / Sigstore)
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
