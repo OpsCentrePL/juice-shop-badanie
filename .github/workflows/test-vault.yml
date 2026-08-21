@@ -89,21 +89,21 @@ jobs:
           VAULT_RESP=$(curl -sSL --request POST \
             --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
             "$VAULT_ADDR/v1/auth/github-jwt/login")
-          
+
           VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          
+
           if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
-            echo "::error::Błąd logowania do Vault:"
-            echo "$VAULT_RESP"
+            echo "::error::Błąd logowania do Vault: $VAULT_RESP"
             exit 1
           fi
           echo "::add-mask::$VAULT_TOKEN"
 
-          # 3. Pobierz sekret z właściwej ścieżki badanie/kubernetes
-          RESP_V2=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
-          
-          # Wyciągnij kubeconfig
-          KUBECFG=$(echo "$RESP_V2" | jq -r '
+          # 3. Pobierz sekret z właściwej ścieżki badanie/kubernetes (KV v2)
+          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
+            "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
+
+          # 4. Bezpieczne wyciągnięcie wartości bez crashowania jq
+          KUBECFG=$(echo "$SECRET_JSON" | jq -r '
             if .data.data? then
               .data.data.config // .data.data.kubeconfig // (.data.data | to_entries[0]?.value) // empty
             else
@@ -113,10 +113,10 @@ jobs:
 
           echo "$KUBECFG" > /tmp/kubeconfig
 
-          # Weryfikacja
+          # 5. Weryfikacja
           if [ -z "$KUBECFG" ] || [ "$KUBECFG" = "null" ] || [ ! -s /tmp/kubeconfig ]; then
             echo "::error::Nie udało się pobrać KUBECONFIG z Vault."
-            echo "Odpowiedź Vault: $RESP_V2"
+            echo "Odpowiedź Vault: $SECRET_JSON"
             exit 1
           fi
 
