@@ -14,7 +14,7 @@ env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop
   ZNACZNIK: ${{ github.sha }}
   VAULT_ADDR: https://vault.opscentre.pl
-  K8S_NAMESPACE: badanie-kontrolny
+  K8S_NAMESPACE: badanie-prod
 
 jobs:
   budowanie:
