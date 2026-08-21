@@ -1,4 +1,5 @@
 name: badanie-K
+
 on:
   push:
     branches:
@@ -13,6 +14,7 @@ env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop
   ZNACZNIK: ${{ github.sha }}
   VAULT_ADDR: https://vault.opscentre.pl
+  K8S_NAMESPACE: badanie-prod
 
 jobs:
   budowanie:
@@ -20,10 +22,17 @@ jobs:
     container:
       image: node:22
     steps:
-      - uses: actions/checkout@v4
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Instalacja zależności
+        run: npm install --no-audit --no-fund
+
+      - name: Budowanie aplikacji
+        run: npm run build
+
+      - name: Wypchnij artefakty
+        uses: actions/upload-artifact@v4
         with:
           name: build-output
           path: |
@@ -31,20 +40,29 @@ jobs:
             frontend/dist/
           retention-days: 1
 
+      - name: Przywróć uprawnienia dla hosta runnera
+        if: always()
+        run: chmod -R 777 .
+
   obraz:
     runs-on: [self-hosted, Linux, X64]
     needs: [budowanie]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Pobierz zbudowane pliki
+        uses: actions/download-artifact@v4
         with:
           name: build-output
+
       - name: Zaloguj do GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Zbuduj i wypchnij obraz
         run: |
           docker build -t "$OBRAZ:$ZNACZNIK" .
@@ -60,18 +78,55 @@ jobs:
     steps:
       - name: Zainstaluj zależności
         run: apk add --no-cache curl jq kubectl
+
       - name: Zaloguj do Vault i pobierz KUBECONFIG
         run: |
+          # 1. Pobierz token OIDC z GitHub Actions
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
-          VAULT_TOKEN=$(vault write -field=token auth/github-jwt/login role=badanie-potok jwt="$GH_TOKEN")
+
+          # 2. Zaloguj do Vault
+          VAULT_RESP=$(curl -sSL --request POST \
+            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
+            "$VAULT_ADDR/v1/auth/github-jwt/login")
+
+          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
+
+          if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
+            echo "::error::Błąd logowania do Vault: $VAULT_RESP"
+            exit 1
+          fi
           echo "::add-mask::$VAULT_TOKEN"
-          VAULT_TOKEN="$VAULT_TOKEN" vault kv get -mount=kv -format=json badanie/kubernetes/kubeconfig \
-            | jq -r '.data.data.<POLE>' > /tmp/kubeconfig
+
+          # 3. Pobierz sekret z właściwej ścieżki badanie/kubernetes (KV v2)
+          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
+            "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
+
+          # 4. Bezpieczne wyciągnięcie wartości bez crashowania jq
+          KUBECFG=$(echo "$SECRET_JSON" | jq -r '
+            if .data.data? then
+              .data.data.config // .data.data.kubeconfig // (.data.data | to_entries[0]?.value) // empty
+            else
+              empty
+            end
+          ')
+
+          echo "$KUBECFG" > /tmp/kubeconfig
+
+          # 5. Weryfikacja
+          if [ -z "$KUBECFG" ] || [ "$KUBECFG" = "null" ] || [ ! -s /tmp/kubeconfig ]; then
+            echo "::error::Nie udało się pobrać KUBECONFIG z Vault."
+            echo "Odpowiedź Vault: $SECRET_JSON"
+            exit 1
+          fi
+
           echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
+
       - name: Wdróż obraz
         run: |
           kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
-        env:
-          K8S_NAMESPACE: <TWOJ_NAMESPACE>
+
+      - name: Wyczyść tymczasowy kubeconfig
+        if: always()
+        run: rm -f /tmp/kubeconfig
