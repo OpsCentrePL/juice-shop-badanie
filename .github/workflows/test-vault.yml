@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - badanie/wzorzec
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -13,7 +14,7 @@ permissions:
   attestations: write
 
 env:
-  OBRAZ: ghcr.io/opscentrepl/juice-shop
+  OBRAZ: ghcr.io/opscentrepl/juice-shop-badanie
   ZNACZNIK: ${{ github.sha }}
   VAULT_ADDR: https://vault.opscentre.pl
   K8S_NAMESPACE: badanie-prod
@@ -81,7 +82,6 @@ jobs:
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
-        
   atestacja:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
