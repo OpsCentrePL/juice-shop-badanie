@@ -14,7 +14,7 @@ env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop
   ZNACZNIK: ${{ github.sha }}
   VAULT_ADDR: https://vault.opscentre.pl
-  K8S_NAMESPACE: badanie-kontrolny # Uzupełnij właściwy namespace
+  K8S_NAMESPACE: badanie-kontrolny
 
 jobs:
   budowanie:
@@ -81,15 +81,27 @@ jobs:
 
       - name: Zaloguj do Vault i pobierz KUBECONFIG
         run: |
+          # 1. Pobierz token OIDC z GitHub Actions
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
-          
-          VAULT_TOKEN=$(vault write -field=token auth/github-jwt/login role=badanie-potok jwt="$GH_TOKEN")
+
+          # 2. Zaloguj do Vault i zamaskuj token w logach
+          VAULT_TOKEN=$(curl -sSL --request POST \
+            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
+            "$VAULT_ADDR/v1/auth/github-jwt/login" | jq -r .auth.client_token)
           echo "::add-mask::$VAULT_TOKEN"
-          
-          VAULT_TOKEN="$VAULT_TOKEN" vault kv get -mount=kv -format=json badanie/kubernetes/kubeconfig \
+
+          # 3. Pobierz kubeconfig bezpośrednio przez REST API (KV v2)
+          curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
+            "$VAULT_ADDR/v1/kv/data/badanie/kubernetes/kubeconfig" \
             | jq -r '.data.data.config' > /tmp/kubeconfig
-            
+
+          # Sprawdź, czy kubeconfig nie jest pusty
+          if [ ! -s /tmp/kubeconfig ] || [ "$(cat /tmp/kubeconfig)" = "null" ]; then
+            echo "Błąd: Nie udało się pobrać kubeconfig z Vault (plik jest pusty lub null)."
+            exit 1
+          fi
+
           echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
 
       - name: Wdróż obraz
