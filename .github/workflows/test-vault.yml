@@ -1,5 +1,6 @@
 name: test-vault
 on: push
+runs-on: [self-hosted, Linux, X64]
 permissions:
   id-token: write
   contents: read
