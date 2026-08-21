@@ -35,7 +35,7 @@ jobs:
             frontend/dist/
           retention-days: 1
       - if: always()
-        run: chmod -R 777 .
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   sast:
     runs-on: [self-hosted, Linux, X64]
@@ -43,16 +43,24 @@ jobs:
       image: node:22-bookworm
     steps:
       - uses: actions/checkout@v4
+      - name: Trust repository directory in Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   obraz:
     runs-on: [self-hosted, Linux, X64]
     needs: [budowanie]
+    container:
+      image: docker:27-cli
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -60,24 +68,24 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: build-output
-      - uses: docker/setup-buildx-action@v3
       - name: Zaloguj do GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Zbuduj i wypchnij obraz
         id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ env.OBRAZ }}:${{ env.ZNACZNIK }}
+        run: |
+          docker build -t "$OBRAZ:$ZNACZNIK" .
+          docker push "$OBRAZ:$ZNACZNIK"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$OBRAZ:$ZNACZNIK" | cut -d'@' -f2)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   atestacja:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
+    container:
+      image: node:22-bookworm
     steps:
       - name: Zaloguj do GHCR
         uses: docker/login-action@v3
@@ -91,6 +99,8 @@ jobs:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: true
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   wdrozenie:
     runs-on: [self-hosted, Linux, X64]
