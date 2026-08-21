@@ -20,8 +20,6 @@ env:
   K8S_NAMESPACE: badanie-prod
 
 jobs:
-  
-
   sast:
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -49,9 +47,6 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-output
       - name: Zaloguj do GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
