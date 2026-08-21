@@ -20,23 +20,7 @@ env:
   K8S_NAMESPACE: badanie-prod
 
 jobs:
-  budowanie:
-    runs-on: [self-hosted, Linux, X64]
-    container:
-      image: node:22-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: |
-            build/
-            frontend/dist/
-          retention-days: 1
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
+  
 
   sast:
     runs-on: [self-hosted, Linux, X64]
