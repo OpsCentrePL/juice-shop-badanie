@@ -22,7 +22,7 @@ jobs:
   budowanie:
     runs-on: [self-hosted, Linux, X64]
     container:
-      image: node:22
+      image: node:22-bookworm
     steps:
       - uses: actions/checkout@v4
       - run: npm install --no-audit --no-fund
@@ -39,12 +39,16 @@ jobs:
 
   sast:
     runs-on: [self-hosted, Linux, X64]
+    container:
+      image: node:22-bookworm
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
       - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
 
   obraz:
     runs-on: [self-hosted, Linux, X64]
