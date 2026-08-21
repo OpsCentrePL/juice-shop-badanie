@@ -41,7 +41,6 @@ jobs:
 
   obraz:
     runs-on: [self-hosted, Linux, X64]
-    needs: [budowanie]
     container:
       image: docker:27-cli
       volumes:
