@@ -1,4 +1,4 @@
-name: badanie-K
+name: badanie-N
 
 on:
   push:
@@ -9,6 +9,8 @@ permissions:
   id-token: write
   contents: read
   packages: write
+  security-events: write
+  attestations: write
 
 env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop
@@ -22,87 +24,89 @@ jobs:
     container:
       image: node:22
     steps:
-      - name: Pobierz kod
-        uses: actions/checkout@v4
-
-      - name: Instalacja zależności
-        run: npm install --no-audit --no-fund
-
-      - name: Budowanie aplikacji
-        run: npm run build
-
-      - name: Wypchnij artefakty
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
         with:
           name: build-output
           path: |
             build/
             frontend/dist/
           retention-days: 1
-
-      - name: Przywróć uprawnienia dla hosta runnera
-        if: always()
+      - if: always()
         run: chmod -R 777 .
+
+  sast:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3
 
   obraz:
     runs-on: [self-hosted, Linux, X64]
     needs: [budowanie]
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
-      - name: Pobierz kod
-        uses: actions/checkout@v4
-
-      - name: Pobierz zbudowane pliki
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           name: build-output
-
+      - uses: docker/setup-buildx-action@v3
       - name: Zaloguj do GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Zbuduj i wypchnij obraz
-        run: |
-          docker build -t "$OBRAZ:$ZNACZNIK" .
-          docker push "$OBRAZ:$ZNACZNIK"
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.OBRAZ }}:${{ env.ZNACZNIK }}
+
+  atestacja:
+    runs-on: [self-hosted, Linux, X64]
+    needs: [obraz]
+    steps:
+      - name: Generuj natywną atestację pochodzenia (build provenance / Sigstore)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.OBRAZ }}
+          subject-digest: ${{ needs.obraz.outputs.digest }}
+          push-to-registry: true
 
   wdrozenie:
     runs-on: [self-hosted, Linux, X64]
     container:
       image: hashicorp/vault:1.18
-    needs: [obraz]
+    needs: [obraz, sast, atestacja]
     environment:
-      name: badanie/kontrolny
+      name: badanie/natywny
     steps:
       - name: Zainstaluj zależności
         run: apk add --no-cache curl jq kubectl
-
       - name: Zaloguj do Vault i pobierz KUBECONFIG
         run: |
-          # 1. Pobierz token OIDC z GitHub Actions
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
-
-          # 2. Zaloguj do Vault
           VAULT_RESP=$(curl -sSL --request POST \
             --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
             "$VAULT_ADDR/v1/auth/github-jwt/login")
-
           VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-
           if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
             echo "::error::Błąd logowania do Vault: $VAULT_RESP"
             exit 1
           fi
           echo "::add-mask::$VAULT_TOKEN"
-
-          # 3. Pobierz sekret z właściwej ścieżki badanie/kubernetes (KV v2)
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
             "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
-
-          # 4. Bezpieczne wyciągnięcie wartości bez crashowania jq
           KUBECFG=$(echo "$SECRET_JSON" | jq -r '
             if .data.data? then
               .data.data.config // .data.data.kubeconfig // (.data.data | to_entries[0]?.value) // empty
@@ -110,23 +114,15 @@ jobs:
               empty
             end
           ')
-
           echo "$KUBECFG" > /tmp/kubeconfig
-
-          # 5. Weryfikacja
           if [ -z "$KUBECFG" ] || [ "$KUBECFG" = "null" ] || [ ! -s /tmp/kubeconfig ]; then
             echo "::error::Nie udało się pobrać KUBECONFIG z Vault."
-            echo "Odpowiedź Vault: $SECRET_JSON"
             exit 1
           fi
-
           echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
-
       - name: Wdróż obraz
         run: |
           kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
-
-      - name: Wyczyść tymczasowy kubeconfig
-        if: always()
+      - if: always()
         run: rm -f /tmp/kubeconfig
