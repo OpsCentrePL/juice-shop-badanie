@@ -93,8 +93,7 @@ jobs:
         with:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
-          push-to-registry: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          push-to-registry: false
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
