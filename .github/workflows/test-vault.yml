@@ -85,20 +85,36 @@ jobs:
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
 
-          # 2. Zaloguj do Vault i zamaskuj token w logach
-          VAULT_TOKEN=$(curl -sSL --request POST \
+          # 2. Zaloguj do Vault
+          VAULT_RESP=$(curl -sSL --request POST \
             --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login" | jq -r .auth.client_token)
+            "$VAULT_ADDR/v1/auth/github-jwt/login")
+          
+          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
+          
+          if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
+            echo "Błąd logowania do Vault:"
+            echo "$VAULT_RESP"
+            exit 1
+          fi
           echo "::add-mask::$VAULT_TOKEN"
 
-          # 3. Pobierz kubeconfig bezpośrednio przez REST API (KV v2)
-          curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
-            "$VAULT_ADDR/v1/kv/data/badanie/kubernetes/kubeconfig" \
-            | jq -r '.data.data.config' > /tmp/kubeconfig
+          # 3. Pobierz payload sekretu (sprawdzenie KV v2, potem KV v1)
+          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
+            "$VAULT_ADDR/v1/kv/data/badanie/kubernetes/kubeconfig")
+          
+          if [ "$(echo "$SECRET_JSON" | jq -r '.data.data // empty')" = "" ]; then
+            SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" \
+              "$VAULT_ADDR/v1/kv/badanie/kubernetes/kubeconfig")
+            echo "$SECRET_JSON" | jq -r '.data.config // .data.kubeconfig // (.data | to_entries[0].value)' > /tmp/kubeconfig
+          else
+            echo "$SECRET_JSON" | jq -r '.data.data.config // .data.data.kubeconfig // (.data.data | to_entries[0].value)' > /tmp/kubeconfig
+          fi
 
-          # Sprawdź, czy kubeconfig nie jest pusty
+          # Weryfikacja
           if [ ! -s /tmp/kubeconfig ] || [ "$(cat /tmp/kubeconfig)" = "null" ]; then
-            echo "Błąd: Nie udało się pobrać kubeconfig z Vault (plik jest pusty lub null)."
+            echo "Błąd: Nie udało się wyodrębnić KUBECONFIG. Odpowiedź z Vault:"
+            echo "$SECRET_JSON"
             exit 1
           fi
 
