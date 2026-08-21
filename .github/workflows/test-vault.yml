@@ -81,6 +81,7 @@ jobs:
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
+        
   atestacja:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
