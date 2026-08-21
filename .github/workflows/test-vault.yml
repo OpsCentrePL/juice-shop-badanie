@@ -1,23 +1,77 @@
-name: test-vault
-on: push
+name: badanie-K
+on:
+  push:
+    branches:
+      - badanie/wzorzec
+
 permissions:
   id-token: write
   contents: read
+  packages: write
+
+env:
+  OBRAZ: ghcr.io/opscentrepl/juice-shop
+  ZNACZNIK: ${{ github.sha }}
+  VAULT_ADDR: https://vault.opscentre.pl
+
 jobs:
-  test:
+  budowanie:
+    runs-on: [self-hosted, Linux, X64]
+    container:
+      image: node:22
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            build/
+            frontend/dist/
+          retention-days: 1
+
+  obraz:
+    runs-on: [self-hosted, Linux, X64]
+    needs: [budowanie]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-output
+      - name: Zaloguj do GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Zbuduj i wypchnij obraz
+        run: |
+          docker build -t "$OBRAZ:$ZNACZNIK" .
+          docker push "$OBRAZ:$ZNACZNIK"
+
+  wdrozenie:
     runs-on: [self-hosted, Linux, X64]
     container:
       image: hashicorp/vault:1.18
+    needs: [obraz]
+    environment:
+      name: badanie/kontrolny
     steps:
-      - name: Zainstaluj curl i jq
-        run: apk add --no-cache curl jq
-      - name: Zaloguj do Vault przez OIDC
+      - name: Zainstaluj zależności
+        run: apk add --no-cache curl jq kubectl
+      - name: Zaloguj do Vault i pobierz KUBECONFIG
         run: |
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
           VAULT_TOKEN=$(vault write -field=token auth/github-jwt/login role=badanie-potok jwt="$GH_TOKEN")
           echo "::add-mask::$VAULT_TOKEN"
-          echo "Zalogowano do Vault, token TTL:"
-          VAULT_TOKEN="$VAULT_TOKEN" vault token lookup -format=json | grep ttl
+          VAULT_TOKEN="$VAULT_TOKEN" vault kv get -mount=kv -format=json badanie/kubernetes/kubeconfig \
+            | jq -r '.data.data.<POLE>' > /tmp/kubeconfig
+          echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
+      - name: Wdróż obraz
+        run: |
+          kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
         env:
-          VAULT_ADDR: https://vault.opscentre.pl
+          K8S_NAMESPACE: <TWOJ_NAMESPACE>
