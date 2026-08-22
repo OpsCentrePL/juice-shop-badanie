@@ -203,36 +203,100 @@ jobs:
         run: apk add --no-cache curl jq ca-certificates
       - name: Zainstaluj Cosign
         run: |
-          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
+          set -Eeuo pipefail
+          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.6.4/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
-      - name: Pobierz klucz Cosign z Vault i podpisz
+          cosign version
+      - name: Uwierzytelnianie do GHCR
         env:
-          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
-          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
-            echo "::error::Błąd logowania do Vault: $VAULT_RESP"; exit 1
-          fi
+          set -Eeuo pipefail
+
+          export DOCKER_CONFIG="$(mktemp -d /tmp/docker.XXXXXX)"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+
+          printf '%s' "$GHCR_TOKEN" | \
+            cosign login ghcr.io \
+              -u "${{ github.actor }}" \
+              --password-stdin
+
+          test -s "${DOCKER_CONFIG}/config.json"
+      - name: Pobierz klucz Cosign z Vault i podpisz
+        run: |
+          set -Eeuo pipefail
+
+          GH_TOKEN="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${VAULT_ADDR}" \
+            | jq -er '.value'
+          )"
+          echo "::add-mask::$GH_TOKEN"
+
+          VAULT_RESP="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc --arg role "badanie-potok" --arg jwt "$GH_TOKEN" '{role:$role,jwt:$jwt}')" \
+              "${VAULT_ADDR}/v1/auth/github-jwt/login"
+          )"
+
+          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
           echo "::add-mask::$VAULT_TOKEN"
 
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
-          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
+          SECRET_JSON="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "X-Vault-Token: $VAULT_TOKEN" \
+              "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
+          )"
+
+          jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' \
+            <<< "$SECRET_JSON" > cosign.key
+
+          COSIGN_PASSWORD="$(
+            jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty' \
+              <<< "$SECRET_JSON"
+          )"
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
+          chmod 600 cosign.key
+          test -s cosign.key
+
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
+
+          echo "Podpisywanie obrazu..."
           cosign sign --key cosign.key --yes "$SKROT"
-          cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
-          exit 0
+
+          echo "Dołączanie atestacji SBOM CycloneDX..."
+          cosign attest \
+            --key cosign.key \
+            --predicate sbom.cdx.json \
+            --type cyclonedx \
+            --yes \
+            "$SKROT"
       - if: always()
-        run: rm -f cosign.key
+        run: |
+          rm -f cosign.key
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
 
   # ========================= SRODOWISKO EFEMERYCZNE =========================
   srodowisko-efemeryczne:
@@ -363,41 +427,195 @@ jobs:
       image: hashicorp/vault:1.18
     steps:
       - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq ca-certificates
+        run: apk add --no-cache curl jq ca-certificates coreutils
       - name: Zainstaluj Cosign
         run: |
-          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
+          set -Eeuo pipefail
+          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.6.4/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
-      - name: Pobierz klucz z Vault i zweryfikuj artefakt
+          cosign version
+      - name: Uwierzytelnianie do GHCR
         env:
-          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
-          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
+          set -Eeuo pipefail
+
+          export DOCKER_CONFIG="$(mktemp -d /tmp/docker.XXXXXX)"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+
+          printf '%s' "$GHCR_TOKEN" | \
+            cosign login ghcr.io \
+              -u "${{ github.actor }}" \
+              --password-stdin
+
+          test -s "${DOCKER_CONFIG}/config.json"
+      - name: Pobierz klucz publiczny z Vault
+        run: |
+          set -Eeuo pipefail
+
+          COSIGN_DIR="$(mktemp -d /tmp/cosign.XXXXXX)"
+          TMP_KEY="${COSIGN_DIR}/cosign.key"
+          TMP_PUB="${COSIGN_DIR}/cosign.pub"
+
+          echo "COSIGN_DIR=$COSIGN_DIR" >> "$GITHUB_ENV"
+          echo "COSIGN_PUB=$TMP_PUB" >> "$GITHUB_ENV"
+
+          GH_TOKEN="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${VAULT_ADDR}" \
+            | jq -er '.value'
+          )"
+          echo "::add-mask::$GH_TOKEN"
+
+          VAULT_RESP="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc --arg role "badanie-potok" --arg jwt "$GH_TOKEN" '{role:$role,jwt:$jwt}')" \
+              "${VAULT_ADDR}/v1/auth/github-jwt/login"
+          )"
+
+          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
           echo "::add-mask::$VAULT_TOKEN"
 
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
-          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
+          SECRET_JSON="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "X-Vault-Token: $VAULT_TOKEN" \
+              "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
+          )"
+
+          jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' \
+            <<< "$SECRET_JSON" > "$TMP_KEY"
+
+          COSIGN_PASSWORD="$(
+            jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty' \
+              <<< "$SECRET_JSON"
+          )"
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
-          cosign public-key --key cosign.key --outfile cosign.pub
-          rm -f cosign.key
+          chmod 600 "$TMP_KEY"
+          test -s "$TMP_KEY"
+
+          cosign public-key --key "$TMP_KEY" --outfile "$TMP_PUB"
+          test -s "$TMP_PUB"
+
+          rm -f "$TMP_KEY"
+          unset COSIGN_PASSWORD
+      - name: Weryfikacja podpisu artefaktu
+        run: |
+          set -Eeuo pipefail
 
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
-          echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
-          cosign verify --key cosign.pub "$SKROT"
-          echo "Weryfikacja atestacji zestawienia komponentow"
-          cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
-          exit 0
+          VERIFY_RESULT="/tmp/cosign-verify.json"
+
+          echo "Weryfikacja podpisu artefaktu przed wdrożeniem produkcyjnym..."
+
+          set +e
+          timeout \
+            --signal=TERM \
+            --kill-after=5s \
+            45s \
+            cosign verify \
+              --timeout 30s \
+              --key "$COSIGN_PUB" \
+              "$SKROT" \
+              > "$VERIFY_RESULT"
+          STATUS=$?
+          set -e
+
+          case "$STATUS" in
+            0)
+              echo "Podpis OK."
+              echo "Rozmiar wyniku Cosign: $(wc -c < "$VERIFY_RESULT") B"
+              ;;
+            124)
+              echo "::error::cosign verify przekroczył timeout 45 s."
+              exit 1
+              ;;
+            137)
+              echo "::error::cosign verify został zabity po przekroczeniu timeoutu."
+              exit 1
+              ;;
+            *)
+              echo "::error::cosign verify zakończył się kodem $STATUS."
+              exit "$STATUS"
+              ;;
+          esac
+      - name: Weryfikacja atestacji SBOM
+        run: |
+          set -Eeuo pipefail
+
+          SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
+          ATTESTATION_RESULT="/tmp/cosign-attestation.json"
+          START_TIME="$(date +%s)"
+
+          echo "Weryfikacja atestacji zestawienia komponentów CycloneDX..."
+
+          set +e
+          timeout \
+            --signal=TERM \
+            --kill-after=5s \
+            45s \
+            cosign verify-attestation \
+              --timeout 30s \
+              --key "$COSIGN_PUB" \
+              --type cyclonedx \
+              "$SKROT" \
+              > "$ATTESTATION_RESULT"
+          STATUS=$?
+          set -e
+
+          END_TIME="$(date +%s)"
+          ELAPSED="$((END_TIME - START_TIME))"
+
+          echo "Czas wykonania: ${ELAPSED}s"
+          echo "Kod zakończenia: $STATUS"
+
+          case "$STATUS" in
+            0)
+              echo "Atestacja SBOM OK."
+              echo "Rozmiar wyniku Cosign: $(wc -c < "$ATTESTATION_RESULT") B"
+              ;;
+            124)
+              echo "::error::cosign verify-attestation przekroczył timeout 45 s."
+              exit 1
+              ;;
+            137)
+              echo "::error::cosign verify-attestation został zabity po przekroczeniu timeoutu."
+              exit 1
+              ;;
+            *)
+              echo "::error::cosign verify-attestation zakończył się kodem $STATUS."
+              exit "$STATUS"
+              ;;
+          esac
       - if: always()
-        run: rm -f cosign.key cosign.pub
+        name: Wyczyść pliki tymczasowe Cosign
+        run: |
+          rm -f /tmp/cosign-verify.json /tmp/cosign-attestation.json
+          if [ -n "${COSIGN_DIR:-}" ]; then
+            rm -rf "$COSIGN_DIR"
+          fi
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
 
   # =============================== WDROZENIE ===============================
   wdrozenie:
