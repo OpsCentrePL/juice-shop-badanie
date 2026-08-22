@@ -21,20 +21,39 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Instalacja Cosign
+      # ------------------------------------------------------------
       - name: Instalacja Cosign
         uses: sigstore/cosign-installer@v3.10.1
         with:
-          cosign-release: "v2.6.2"
+          cosign-release: "v2.6.4"
 
+      # ------------------------------------------------------------
+      # 2. Informacje diagnostyczne
+      # ------------------------------------------------------------
       - name: Sprawdź wersję
-        run: cosign version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
+          cosign version
+
+          echo
+          echo "timeout:"
+          command -v timeout
+          timeout --version | head -n 1
+
+      # ------------------------------------------------------------
+      # 3. Pobranie klucza z Vault przez GitHub OIDC
+      # ------------------------------------------------------------
       - name: Pobierz klucz publiczny
         shell: bash
         run: |
           set -Eeuo pipefail
 
           COSIGN_DIR="$(mktemp -d "${RUNNER_TEMP}/cosign.XXXXXX")"
+
           TMP_KEY="${COSIGN_DIR}/cosign.key"
           TMP_PUB="${COSIGN_DIR}/cosign.pub"
 
@@ -55,6 +74,8 @@ jobs:
             | jq -er '.value'
           )"
 
+          echo "::add-mask::$GH_TOKEN"
+
           echo "2. Logowanie OIDC do Vault..."
 
           VAULT_RESP="$(
@@ -66,17 +87,22 @@ jobs:
               --max-time 15 \
               --request POST \
               --header "Content-Type: application/json" \
-              --data "$(jq -nc \
-                --arg role "badanie-potok" \
-                --arg jwt "$GH_TOKEN" \
-                '{role:$role,jwt:$jwt}')" \
+              --data "$(
+                jq -nc \
+                  --arg role "badanie-potok" \
+                  --arg jwt "$GH_TOKEN" \
+                  '{role:$role,jwt:$jwt}'
+              )" \
               "${VAULT_ADDR}/v1/auth/github-jwt/login"
           )"
 
-          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
+          VAULT_TOKEN="$(
+            jq -er '.auth.client_token' <<< "$VAULT_RESP"
+          )"
+
           echo "::add-mask::$VAULT_TOKEN"
 
-          echo "3. Pobieranie klucza z Vault..."
+          echo "3. Pobieranie klucza Cosign z Vault..."
 
           SECRET_JSON="$(
             curl \
@@ -85,24 +111,34 @@ jobs:
               --show-error \
               --connect-timeout 5 \
               --max-time 15 \
-              -H "X-Vault-Token: $VAULT_TOKEN" \
+              --header "X-Vault-Token: $VAULT_TOKEN" \
               "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
           )"
 
-          jq -er '.data.data.key' <<< "$SECRET_JSON" > "$TMP_KEY"
+          jq -er \
+            '.data.data.key // empty' \
+            <<< "$SECRET_JSON" \
+            > "$TMP_KEY"
 
           COSIGN_PASSWORD="$(
             jq -er '
               .data.data.password //
               .data.data.cosign_password //
-              .data.data.pass
+              .data.data.pass //
+              empty
             ' <<< "$SECRET_JSON"
           )"
 
-          export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
+          export COSIGN_PASSWORD
+
           chmod 600 "$TMP_KEY"
+
+          if [[ ! -s "$TMP_KEY" ]]; then
+            echo "ERROR: Vault nie zwrócił klucza Cosign."
+            exit 1
+          fi
 
           echo "4. Generowanie klucza publicznego..."
 
@@ -110,12 +146,25 @@ jobs:
             --key "$TMP_KEY" \
             --outfile "$TMP_PUB"
 
-          # Klucz prywatny od tego miejsca nie jest już potrzebny.
+          if [[ ! -s "$TMP_PUB" ]]; then
+            echo "ERROR: Nie udało się wygenerować klucza publicznego."
+            exit 1
+          fi
+
+          #
+          # Klucz prywatny nie jest już potrzebny.
+          #
           rm -f "$TMP_KEY"
+
           unset COSIGN_PASSWORD
+          unset GH_TOKEN
+          unset VAULT_TOKEN
 
-          test -s "$TMP_PUB"
+          echo "Klucz publiczny przygotowany."
 
+      # ------------------------------------------------------------
+      # 4. Tymczasowe uwierzytelnienie do GHCR
+      # ------------------------------------------------------------
       - name: Uwierzytelnianie do GHCR
         shell: bash
         env:
@@ -123,11 +172,22 @@ jobs:
         run: |
           set -Eeuo pipefail
 
+          DOCKER_CONFIG="$(
+            mktemp -d "${RUNNER_TEMP}/docker.XXXXXX"
+          )"
+
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+
           printf '%s' "$GHCR_TOKEN" |
             cosign login ghcr.io \
               -u "${{ github.actor }}" \
               --password-stdin
 
+          echo "Logowanie do GHCR zakończone."
+
+      # ------------------------------------------------------------
+      # 5. Weryfikacja podpisu obrazu
+      # ------------------------------------------------------------
       - name: Weryfikacja podpisu
         shell: bash
         run: |
@@ -135,14 +195,49 @@ jobs:
 
           echo "Weryfikacja podpisu obrazu..."
 
-          timeout -k 5s 45s \
+          VERIFY_RESULT="${RUNNER_TEMP}/cosign-verify.json"
+
+          set +e
+
+          timeout \
+            --signal=TERM \
+            --kill-after=5s \
+            45s \
             cosign verify \
               --timeout 30s \
               --key "$COSIGN_PUB" \
-              "$OBRAZ_TESTOWY"
+              "$OBRAZ_TESTOWY" \
+              > "$VERIFY_RESULT"
 
-          echo "Podpis OK"
+          STATUS=$?
 
+          set -e
+
+          case "$STATUS" in
+            0)
+              echo "Podpis OK."
+              echo "Rozmiar wyniku Cosign: $(wc -c < "$VERIFY_RESULT") B"
+              ;;
+
+            124)
+              echo "ERROR: cosign verify przekroczył timeout 45 s."
+              exit 1
+              ;;
+
+            137)
+              echo "ERROR: cosign verify został zabity po przekroczeniu timeoutu."
+              exit 1
+              ;;
+
+            *)
+              echo "ERROR: cosign verify zakończył się kodem $STATUS."
+              exit "$STATUS"
+              ;;
+          esac
+
+      # ------------------------------------------------------------
+      # 6. Weryfikacja atestacji SBOM
+      # ------------------------------------------------------------
       - name: Weryfikacja atestacji SBOM
         shell: bash
         run: |
@@ -150,20 +245,76 @@ jobs:
 
           echo "Weryfikacja atestacji CycloneDX..."
 
-          timeout -k 5s -s QUIT 30s \
-          cosign verify-attestation \
-            -d \
-            --timeout 20s \
-            --key "$COSIGN_PUB" \
-            --type cyclonedx \
-            "$OBRAZ_TESTOWY"
+          ATTESTATION_RESULT="${RUNNER_TEMP}/cosign-attestation.json"
 
-          echo "Atestacja OK"
+          START_TIME="$(date +%s)"
 
+          set +e
+
+          timeout \
+            --signal=TERM \
+            --kill-after=5s \
+            45s \
+            cosign verify-attestation \
+              --timeout 30s \
+              --key "$COSIGN_PUB" \
+              --type cyclonedx \
+              "$OBRAZ_TESTOWY" \
+              > "$ATTESTATION_RESULT"
+
+          STATUS=$?
+
+          set -e
+
+          END_TIME="$(date +%s)"
+          ELAPSED="$((END_TIME - START_TIME))"
+
+          echo "Czas wykonania: ${ELAPSED}s"
+          echo "Kod zakończenia: $STATUS"
+
+          case "$STATUS" in
+            0)
+              echo "Atestacja SBOM OK."
+              echo "Rozmiar wyniku Cosign: $(wc -c < "$ATTESTATION_RESULT") B"
+              ;;
+
+            124)
+              echo "ERROR: cosign verify-attestation przekroczył timeout 45 s."
+              exit 1
+              ;;
+
+            137)
+              echo "ERROR: cosign verify-attestation został zabity po przekroczeniu timeoutu."
+              exit 1
+              ;;
+
+            *)
+              echo "ERROR: cosign verify-attestation zakończył się kodem $STATUS."
+              exit "$STATUS"
+              ;;
+          esac
+
+      # ------------------------------------------------------------
+      # 7. Czyszczenie
+      # ------------------------------------------------------------
       - name: Czyszczenie
         if: always()
         shell: bash
         run: |
+          set +e
+
+          echo "Czyszczenie plików tymczasowych..."
+
           if [[ -n "${COSIGN_DIR:-}" ]]; then
             rm -rf "$COSIGN_DIR"
           fi
+
+          if [[ -n "${DOCKER_CONFIG:-}" ]]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+          rm -f \
+            "${RUNNER_TEMP}/cosign-verify.json" \
+            "${RUNNER_TEMP}/cosign-attestation.json"
+
+          echo "Czyszczenie zakończone."
