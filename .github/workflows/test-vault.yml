@@ -78,6 +78,8 @@ jobs:
           name: semgrep-sarif
           path: semgrep.sarif
           retention-days: 7
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   gitleaks-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -89,6 +91,7 @@ jobs:
         with:
           fetch-depth: 0
       - run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           gitleaks detect --source . --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - uses: actions/upload-artifact@v4
         if: always()
@@ -96,6 +99,8 @@ jobs:
           name: gitleaks-sarif
           path: gitleaks.sarif
           retention-days: 7
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   trivy-iac-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -112,6 +117,8 @@ jobs:
           name: trivy-iac-sarif
           path: trivy-iac.sarif
           retention-days: 7
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
   obraz:
@@ -161,17 +168,23 @@ jobs:
           name: trivy-obraz-sarif
           path: trivy-obraz.sarif
           retention-days: 7
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ============ [N] ATESTACJA NATYWNA (build provenance / Sigstore) ============
   atestacja:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
+    container:
+      image: node:22-bookworm
     steps:
       - uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: false
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ============= [E] ZESTAWIENIE KOMPONENTOW (SBOM) I PODPIS (COSIGN) =============
   sbom:
@@ -187,6 +200,8 @@ jobs:
         with:
           name: sbom
           path: sbom.cdx.json
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   podpis:
     runs-on: [self-hosted, Linux, X64]
@@ -194,12 +209,11 @@ jobs:
     container:
       image: hashicorp/vault:1.18
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: sbom
       - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq
+        run: apk add --no-cache curl jq ca-certificates
       - name: Zainstaluj Cosign
         run: |
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
@@ -225,14 +239,23 @@ jobs:
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
+          # Generowanie klucza publicznego
+          cosign public-key --key cosign.key --outfile cosign.pub
+
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
 
           cosign sign --key cosign.key --yes "$SKROT"
           cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
           cosign verify --key cosign.pub "$SKROT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cosign-pub
+          path: cosign.pub
       - if: always()
-        run: rm -f cosign.key
+        run: |
+          rm -f cosign.key
+          chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ========================= SRODOWISKO EFEMERYCZNE =========================
   srodowisko-efemeryczne:
@@ -291,7 +314,9 @@ jobs:
           EOF
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "$NAZWA" --timeout=180s
       - if: always()
-        run: rm -f /tmp/kubeconfig
+        run: |
+          rm -f /tmp/kubeconfig
+          chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ============================ TESTOWANIE DAST ============================
   zap-krzyzowy:
@@ -309,6 +334,8 @@ jobs:
         with:
           name: zap-report
           path: /zap/wrk/zap.json
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
@@ -340,7 +367,9 @@ jobs:
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "$NAZWA" --ignore-not-found
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "$NAZWA" --ignore-not-found
       - if: always()
-        run: rm -f /tmp/kubeconfig
+        run: |
+          rm -f /tmp/kubeconfig
+          chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ========================== [E] BRAMKA PRZEDWDROZENIOWA ==========================
   brama-integralnosci:
@@ -349,16 +378,21 @@ jobs:
     container:
       image: alpine:3.20
     steps:
-      - uses: actions/checkout@v4
-      - run: apk add --no-cache curl
+      - uses: actions/download-artifact@v4
+        with:
+          name: cosign-pub
+      - run: apk add --no-cache curl ca-certificates
       - run: |
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
           cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # =============================== WDROZENIE ===============================
   wdrozenie:
@@ -389,4 +423,6 @@ jobs:
           kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
       - if: always()
-        run: rm -f /tmp/kubeconfig
+        run: |
+          rm -f /tmp/kubeconfig
+          chmod -R 777 . "$GITHUB_WORKSPACE"
