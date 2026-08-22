@@ -1,4 +1,5 @@
 name: badanie-R
+
 on:
   push:
     branches:
@@ -6,12 +7,14 @@ on:
       - badanie/referencyjny
       - badanier
   workflow_dispatch:
+
 permissions:
   id-token: write
   contents: read
   packages: write
   security-events: write
   attestations: write
+
 env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop-badanie
   ZNACZNIK: ${{ github.sha }}
@@ -19,6 +22,7 @@ env:
   K8S_NAMESPACE: badanie-prod
   K8S_NAMESPACE_EFEMERYCZNY: badanie-efemeryczne
   DAST_TARGET_URL: https://owasp-gh-${{ github.run_id }}.opscentre.pl
+
 jobs:
   # ============================= ETAP BUDOWANIA =============================
   budowanie:
@@ -39,6 +43,7 @@ jobs:
           retention-days: 1
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
+
   # ========================== [N] ANALIZA NATYWNA ===========================
   sast:
     runs-on: [self-hosted, Linux, X64]
@@ -53,6 +58,7 @@ jobs:
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"
+
   # ==================== [E] KONTROLA KRZYZOWA (KOD I IAC) ====================
   semgrep-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -70,6 +76,7 @@ jobs:
           name: semgrep-sarif
           path: semgrep.sarif
           retention-days: 7
+
   gitleaks-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -88,6 +95,7 @@ jobs:
           name: gitleaks-sarif
           path: gitleaks.sarif
           retention-days: 7
+
   trivy-iac-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -102,6 +110,7 @@ jobs:
           name: trivy-iac-sarif
           path: trivy-iac.sarif
           retention-days: 7
+
   # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
   obraz:
     runs-on: [self-hosted, Linux, X64]
@@ -134,6 +143,7 @@ jobs:
           path: skrot-obrazu.txt
       - if: always() 
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
+
   trivy-obraz-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
@@ -149,6 +159,7 @@ jobs:
           name: trivy-obraz-sarif
           path: trivy-obraz.sarif
           retention-days: 7
+
   # ============ [N] ATESTACJA NATYWNA (build provenance / Sigstore) ============
   atestacja:
     runs-on: [self-hosted, Linux, X64]
@@ -161,6 +172,7 @@ jobs:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: false
+
   # ============= [E] ZESTAWIENIE KOMPONENTOW (SBOM) I PODPIS (COSIGN) =============
   sbom:
     runs-on: [self-hosted, Linux, X64]
@@ -177,6 +189,7 @@ jobs:
         with:
           name: sbom
           path: sbom.cdx.json
+
   podpis:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz, sbom]
@@ -204,23 +217,21 @@ jobs:
             echo "::error::Błąd logowania do Vault: $VAULT_RESP"; exit 1
           fi
           echo "::add-mask::$VAULT_TOKEN"
+
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
           echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
           COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
-          cosign public-key --key cosign.key --outfile cosign.pub
+
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+
           cosign sign --key cosign.key --yes "$SKROT"
           cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
-          cosign verify --key cosign.pub "$SKROT"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cosign-pub
-          path: cosign.pub
       - if: always()
         run: rm -f cosign.key
+
   # ========================= SRODOWISKO EFEMERYCZNE =========================
   srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
@@ -292,6 +303,7 @@ jobs:
           done
       - if: always()
         run: rm -f /tmp/kubeconfig
+
   # ============================ TESTOWANIE DAST ============================
   zap-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -307,6 +319,7 @@ jobs:
           cmd_options: '-a'
           allow_issue_writing: false
           artifact_name: zap-report
+
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
@@ -338,24 +351,48 @@ jobs:
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "$NAZWA" --ignore-not-found
       - if: always()
         run: rm -f /tmp/kubeconfig
+
   # ========================== [E] BRAMKA PRZEDWDROZENIOWA ==========================
   brama-integralnosci:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz, podpis, trivy-obraz-krzyzowy]
     timeout-minutes: 3
+    container:
+      image: hashicorp/vault:1.18
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: cosign-pub
+      - name: Zainstaluj zależności
+        run: apk add --no-cache curl jq ca-certificates
       - name: Zainstaluj Cosign
-        uses: sigstore/cosign-installer@v3.8.0
-      - name: Weryfikacja integralnosci i atestacji
         run: |
-          SKROT="${{ env.OBRAZ }}@${{ needs.obraz.outputs.digest }}"
+          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
+          chmod +x /usr/local/bin/cosign
+      - name: Pobierz klucz z Vault i zweryfikuj artefakt
+        run: |
+          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
+          VAULT_RESP=$(curl -sSL --request POST \
+            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
+            "$VAULT_ADDR/v1/auth/github-jwt/login")
+          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
+          echo "::add-mask::$VAULT_TOKEN"
+
+          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
+          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
+          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
+          export COSIGN_PASSWORD
+          echo "::add-mask::$COSIGN_PASSWORD"
+
+          cosign public-key --key cosign.key --outfile cosign.pub
+          rm -f cosign.key
+
+          SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
           cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
+      - if: always()
+        run: rm -f cosign.key cosign.pub
+
   # =============================== WDROZENIE ===============================
   wdrozenie:
     runs-on: [self-hosted, Linux, X64]
