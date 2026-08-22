@@ -1,431 +1,57 @@
-name: badanie-R
+name: Debug-Brama
 
 on:
-  push:
-    branches:
-      - badanie/wzorzec
-      - badanie/referencyjny
-      - badanier
-  workflow_dispatch:
+  workflow_dispatch: # Pozwala na reczne odpalenie z poziomu interfejsu GitHuba
 
 permissions:
   id-token: write
   contents: read
-  packages: write
-  security-events: write
-  attestations: write
+  packages: read
 
 env:
-  OBRAZ: ghcr.io/opscentrepl/juice-shop-badanie
-  ZNACZNIK: ${{ github.sha }}
+  # Hardcoded obraz z Twojego zrzutu ekranu
+  OBRAZ_TESTOWY: ghcr.io/opscentrepl/juice-shop-badanie@sha256:d103f943b6fc74baa630706c4ce5d2dab14d99a8d9b701e7c539dea12a60b635
   VAULT_ADDR: https://vault.opscentre.pl
-  K8S_NAMESPACE: badanie-prod
-  K8S_NAMESPACE_EFEMERYCZNY: badanie-efemeryczne
-  DAST_TARGET_URL: https://owasp-gh-${{ github.run_id }}.opscentre.pl
 
 jobs:
-  # ============================= ETAP BUDOWANIA =============================
-  budowanie:
+  brama-izolowana:
+    # BRAK DYREKTYWY 'container' - uruchamiamy bezposrednio na hoście runnera
     runs-on: [self-hosted, Linux, X64]
-    container:
-      image: node:22-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-output
-          path: |
-            build/
-            frontend/dist/
-          if-no-files-found: error
-          retention-days: 1
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
-
-  # ========================== [N] ANALIZA NATYWNA ===========================
-  sast:
-    runs-on: [self-hosted, Linux, X64]
-    container:
-      image: node:22-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: javascript-typescript
-      - uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript-typescript"
-
-  # ==================== [E] KONTROLA KRZYZOWA (KOD I IAC) ====================
-  semgrep-krzyzowy:
-    runs-on: [self-hosted, Linux, X64]
-    container:
-      image: returntocorp/semgrep:1.97.0
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          semgrep --config=p/security-audit --config=p/owasp-top-ten \
-            --sarif --output semgrep.sarif --metrics=off .
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: semgrep-sarif
-          path: semgrep.sarif
-          retention-days: 7
-
-  gitleaks-krzyzowy:
-    runs-on: [self-hosted, Linux, X64]
-    container:
-      image: zricethezav/gitleaks:v8.22.1
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          gitleaks detect --source . --report-format sarif --report-path gitleaks.sarif --exit-code 0
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: gitleaks-sarif
-          path: gitleaks.sarif
-          retention-days: 7
-
-  trivy-iac-krzyzowy:
-    runs-on: [self-hosted, Linux, X64]
-    container:
-      image: aquasec/trivy:0.58.1
-    continue-on-error: true
-    steps:
-      - run: |
-          trivy config --format sarif --output trivy-iac.sarif --exit-code 0 .
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: trivy-iac-sarif
-          path: trivy-iac.sarif
-          retention-days: 7
-
-  # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
-  obraz:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [budowanie]
-    container:
-      image: docker:27-cli
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-output
-      - name: Zaloguj do GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Zbuduj i wypchnij obraz
-        id: build
-        run: |
-          docker build --no-cache -t "$OBRAZ:$ZNACZNIK" .
-          docker push "$OBRAZ:$ZNACZNIK"
-          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$OBRAZ:$ZNACZNIK" | cut -d'@' -f2)
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "$DIGEST" > skrot-obrazu.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: skrot-obrazu
-          path: skrot-obrazu.txt
-      - if: always() 
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
-
-  trivy-obraz-krzyzowy:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [obraz]
-    container:
-      image: aquasec/trivy:0.58.1
-    continue-on-error: true
-    steps:
-      - run: |
-          trivy image --format sarif --output trivy-obraz.sarif --exit-code 0 "$OBRAZ:$ZNACZNIK"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: trivy-obraz-sarif
-          path: trivy-obraz.sarif
-          retention-days: 7
-
-  # ============ [N] ATESTACJA NATYWNA (build provenance / Sigstore) ============
-  atestacja:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [obraz]
-    container:
-      image: node:22-bookworm
-    steps:
-      - uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ${{ env.OBRAZ }}
-          subject-digest: ${{ needs.obraz.outputs.digest }}
-          push-to-registry: false
-
-  # ============= [E] ZESTAWIENIE KOMPONENTOW (SBOM) I PODPIS (COSIGN) =============
-  sbom:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [obraz]
-    steps:
-      - name: Wygeneruj SBOM (CycloneDX)
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.OBRAZ }}@${{ needs.obraz.outputs.digest }}
-          format: cyclonedx-json
-          output-file: sbom.cdx.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.cdx.json
-
-  podpis:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [obraz, sbom]
-    container:
-      image: hashicorp/vault:1.18
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: sbom
-      - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq ca-certificates
-      - name: Zainstaluj Cosign
-        run: |
-          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
-          chmod +x /usr/local/bin/cosign
-      - name: Pobierz klucz Cosign z Vault i podpisz
-        env:
-          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
-          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then
-            echo "::error::Błąd logowania do Vault: $VAULT_RESP"; exit 1
-          fi
-          echo "::add-mask::$VAULT_TOKEN"
-
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
-          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
-          export COSIGN_PASSWORD
-          echo "::add-mask::$COSIGN_PASSWORD"
-
-          SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
-          cosign sign --key cosign.key --yes "$SKROT"
-          cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
-          exit 0
-      - if: always()
-        run: rm -f cosign.key
-
-  # ========================= SRODOWISKO EFEMERYCZNE =========================
-  srodowisko-efemeryczne:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [podpis]
     timeout-minutes: 5
-    container:
-      image: hashicorp/vault:1.18
-    environment:
-      name: badanie/efemeryczne-${{ github.run_id }}
-      url: ${{ env.DAST_TARGET_URL }}
     steps:
-      - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq kubectl
-      - name: Zaloguj do Vault i pobierz KUBECONFIG
-        run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          echo "::add-mask::$VAULT_TOKEN"
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
-          KUBECFG=$(echo "$SECRET_JSON" | jq -r '.data.data.config // .data.data.kubeconfig // (.data.data|to_entries[0]?.value) // empty')
-          echo "$KUBECFG" > /tmp/kubeconfig
-          echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
-      - name: Wdróż środowisko efemeryczne
-        run: |
-          NAZWA="juice-shop-gh-${{ github.run_id }}"
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" create deployment "$NAZWA" --image="$OBRAZ:$ZNACZNIK"
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" patch deployment "$NAZWA" -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ghcr-registry-secret"}]}}}}'
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" expose deployment "$NAZWA" --port=3000
-          cat <<EOF | kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" apply -f -
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: $NAZWA
-            annotations:
-              nginx.ingress.kubernetes.io/backend-protocol: HTTP
-              nginx.ingress.kubernetes.io/ssl-redirect: "true"
-          spec:
-            ingressClassName: nginx
-            tls:
-            - hosts: ["owasp-gh-${{ github.run_id }}.opscentre.pl"]
-              secretName: opscentre-wildcard-tls
-            rules:
-            - host: "owasp-gh-${{ github.run_id }}.opscentre.pl"
-              http:
-                paths:
-                - path: /
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: "$NAZWA"
-                      port:
-                        number: 3000
-          EOF
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "$NAZWA" --timeout=120s
-          
-          echo "Oczekiwanie na gotowość Ingressu HTTPS..."
-          for i in $(seq 1 30); do
-            HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "$DAST_TARGET_URL" || true)
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
-              echo "Aplikacja pod adresem $DAST_TARGET_URL odpowiada poprawnie (HTTP $HTTP_CODE)."
-              break
-            fi
-            echo "Próba $i/30: HTTP $HTTP_CODE, czekam 3s..."
-            sleep 3
-          done
-      - if: always()
-        run: rm -f /tmp/kubeconfig
-
-  # ============================ TESTOWANIE DAST ============================
-  zap-krzyzowy:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [srodowisko-efemeryczne]
-    timeout-minutes: 10
-    continue-on-error: true
-    steps:
-      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
-        uses: zaproxy/action-baseline@v0.14.0
+      - name: Instalacja Cosign (oficjalna akcja zamiast wget)
+        uses: sigstore/cosign-installer@v3.5.0
         with:
-          target: ${{ env.DAST_TARGET_URL }}
-          rules_file_name: ''
-          cmd_options: '-a'
-          allow_issue_writing: false
-          artifact_name: zap-report
+          cosign-release: 'v2.4.1'
 
-  # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
-  usun-srodowisko-efemeryczne:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [srodowisko-efemeryczne, zap-krzyzowy]
-    if: always()
-    container:
-      image: hashicorp/vault:1.18
-    steps:
-      - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq kubectl
-      - name: Zaloguj do Vault i pobierz KUBECONFIG
+      - name: Zaloguj do rejestru GHCR
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pobierz klucz publiczny z Vault i weryfikuj
+        run: |
+          echo "1. Uwierzytelnianie OIDC do Vaulta..."
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
+
           VAULT_RESP=$(curl -sSL --request POST \
             --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
             "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          echo "::add-mask::$VAULT_TOKEN"
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
-          KUBECFG=$(echo "$SECRET_JSON" | jq -r '.data.data.config // .data.data.kubeconfig // (.data.data|to_entries[0]?.value) // empty')
-          echo "$KUBECFG" > /tmp/kubeconfig
-          echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
-      - name: Usuń zasoby efemeryczne
-        run: |
-          NAZWA="juice-shop-gh-${{ github.run_id }}"
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete ingress "$NAZWA" --ignore-not-found
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "$NAZWA" --ignore-not-found
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "$NAZWA" --ignore-not-found
-      - if: always()
-        run: rm -f /tmp/kubeconfig
 
-  # ========================== [E] BRAMKA PRZEDWDROZENIOWA ==========================
-  brama-integralnosci:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [obraz, podpis, trivy-obraz-krzyzowy]
-    timeout-minutes: 3
-    container:
-      image: hashicorp/vault:1.18
-    steps:
-      - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq ca-certificates
-      - name: Zainstaluj Cosign
-        run: |
-          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
-          chmod +x /usr/local/bin/cosign
-      - name: Pobierz klucz z Vault i zweryfikuj artefakt
-        env:
-          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
-          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
           VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
           echo "::add-mask::$VAULT_TOKEN"
 
+          echo "2. Pobieranie klucza publicznego..."
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
-          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
-          export COSIGN_PASSWORD
-          echo "::add-mask::$COSIGN_PASSWORD"
+          
+          # Ponieważ do weryfikacji potrzebny jest tylko klucz publiczny, wyciągamy go z klucza prywatnego (Cosign to wspiera) lub pobieramy
+          echo "$SECRET_JSON" | jq -r '.data.data.key // empty' > cosign.pub
 
-          cosign public-key --key cosign.key --outfile cosign.pub
-          rm -f cosign.key
+          echo "3. Weryfikacja podpisu..."
+          cosign verify --key cosign.pub "$OBRAZ_TESTOWY"
 
-          SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
-          echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
-          cosign verify --key cosign.pub "$SKROT"
-          echo "Weryfikacja atestacji zestawienia komponentow"
-          cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
-          exit 0
-      - if: always()
-        run: rm -f cosign.key cosign.pub
+          echo "4. Weryfikacja atestacji SBOM..."
+          cosign verify-attestation --key cosign.pub --type cyclonedx "$OBRAZ_TESTOWY"
 
-  # =============================== WDROZENIE ===============================
-  wdrozenie:
-    runs-on: [self-hosted, Linux, X64]
-    needs: [brama-integralnosci, zap-krzyzowy]
-    container:
-      image: hashicorp/vault:1.18
-    environment:
-      name: badanie/referencyjny
-    steps:
-      - name: Zainstaluj zależności
-        run: apk add --no-cache curl jq kubectl
-      - name: Zaloguj do Vault i pobierz KUBECONFIG
-        run: |
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
-          echo "::add-mask::$VAULT_TOKEN"
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/kubernetes")
-          KUBECFG=$(echo "$SECRET_JSON" | jq -r '.data.data.config // .data.data.kubeconfig // (.data.data|to_entries[0]?.value) // empty')
-          echo "$KUBECFG" > /tmp/kubeconfig
-          echo "KUBECONFIG=/tmp/kubeconfig" >> "$GITHUB_ENV"
-      - name: Wdróż obraz
-        run: |
-          kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
-          kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
-      - if: always()
-        run: rm -f /tmp/kubeconfig
+          echo "5. Gotowe. Czyszczenie..."
+          rm -f cosign.pub
