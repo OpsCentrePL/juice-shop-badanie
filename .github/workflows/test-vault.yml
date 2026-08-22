@@ -1,4 +1,4 @@
-name: badanie-R
+ame: badanie-R
 
 on:
   push:
@@ -203,7 +203,7 @@ jobs:
         run: apk add --no-cache curl jq ca-certificates
       - name: Zainstaluj Cosign
         run: |
-          set -Eeuo pipefail
+          set -eu
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.6.4/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
           cosign version
@@ -211,7 +211,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           export DOCKER_CONFIG="$(mktemp -d /tmp/docker.XXXXXX)"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
@@ -224,7 +224,7 @@ jobs:
           test -s "${DOCKER_CONFIG}/config.json"
       - name: Pobierz klucz Cosign z Vault i podpisz
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           GH_TOKEN="$(
             curl \
@@ -252,7 +252,7 @@ jobs:
               "${VAULT_ADDR}/v1/auth/github-jwt/login"
           )"
 
-          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
+          VAULT_TOKEN="$(printf '%s' "$VAULT_RESP" | jq -er '.auth.client_token')"
           echo "::add-mask::$VAULT_TOKEN"
 
           SECRET_JSON="$(
@@ -266,12 +266,12 @@ jobs:
               "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
           )"
 
-          jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' \
-            <<< "$SECRET_JSON" > cosign.key
+          printf '%s' "$SECRET_JSON" | \
+            jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
 
           COSIGN_PASSWORD="$(
-            jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty' \
-              <<< "$SECRET_JSON"
+            printf '%s' "$SECRET_JSON" | \
+              jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty'
           )"
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
@@ -430,7 +430,7 @@ jobs:
         run: apk add --no-cache curl jq ca-certificates coreutils
       - name: Zainstaluj Cosign
         run: |
-          set -Eeuo pipefail
+          set -eu
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.6.4/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
           cosign version
@@ -438,7 +438,7 @@ jobs:
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           export DOCKER_CONFIG="$(mktemp -d /tmp/docker.XXXXXX)"
           echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
@@ -451,7 +451,7 @@ jobs:
           test -s "${DOCKER_CONFIG}/config.json"
       - name: Pobierz klucz publiczny z Vault
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           COSIGN_DIR="$(mktemp -d /tmp/cosign.XXXXXX)"
           TMP_KEY="${COSIGN_DIR}/cosign.key"
@@ -486,7 +486,7 @@ jobs:
               "${VAULT_ADDR}/v1/auth/github-jwt/login"
           )"
 
-          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
+          VAULT_TOKEN="$(printf '%s' "$VAULT_RESP" | jq -er '.auth.client_token')"
           echo "::add-mask::$VAULT_TOKEN"
 
           SECRET_JSON="$(
@@ -500,12 +500,12 @@ jobs:
               "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
           )"
 
-          jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' \
-            <<< "$SECRET_JSON" > "$TMP_KEY"
+          printf '%s' "$SECRET_JSON" | \
+            jq -er '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > "$TMP_KEY"
 
           COSIGN_PASSWORD="$(
-            jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty' \
-              <<< "$SECRET_JSON"
+            printf '%s' "$SECRET_JSON" | \
+              jq -er '.data.data.password // .data.data.cosign_password // .data.data.pass // empty'
           )"
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
@@ -520,7 +520,7 @@ jobs:
           unset COSIGN_PASSWORD
       - name: Weryfikacja podpisu artefaktu
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           VERIFY_RESULT="/tmp/cosign-verify.json"
@@ -560,7 +560,7 @@ jobs:
           esac
       - name: Weryfikacja atestacji SBOM
         run: |
-          set -Eeuo pipefail
+          set -eu
 
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           ATTESTATION_RESULT="/tmp/cosign-attestation.json"
