@@ -284,6 +284,7 @@ jobs:
         run: |
           NAZWA="juice-shop-gh-${{ github.run_id }}"
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" create deployment "$NAZWA" --image="$OBRAZ:$ZNACZNIK"
+          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" patch deployment "$NAZWA" -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ghcr-registry-secret"}]}}}}'
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" expose deployment "$NAZWA" --port=3000
           cat <<EOF | kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" apply -f -
           apiVersion: networking.k8s.io/v1
@@ -417,4 +418,3 @@ jobs:
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
       - if: always()
         run: rm -f /tmp/kubeconfig
-        
