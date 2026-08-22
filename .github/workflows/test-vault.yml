@@ -19,56 +19,150 @@ jobs:
   brama-izolowana:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
+
     steps:
       - name: Instalacja Cosign
-        uses: sigstore/cosign-installer@v3.5.0
+        uses: sigstore/cosign-installer@v3.10.1
         with:
-          cosign-release: 'v2.4.1'
+          cosign-release: "v2.6.2"
 
-      # ROZWIĄZANIE PROBLEMU: Czyste uwierzytelnienie bez potoków (pipe'ów) blokujących I/O
-      - name: Zaloguj do rejestru GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sprawdź wersję
+        run: cosign version
 
-      - name: Pobierz klucz z Vault, wygeneruj publiczny i weryfikuj
+      - name: Pobierz klucz publiczny
+        shell: bash
         run: |
-          export SIGSTORE_CACHE_DIR="$(mktemp -d)"
+          set -Eeuo pipefail
 
-          echo "1. Uwierzytelnianie OIDC do Vaulta..."
-          GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
+          COSIGN_DIR="$(mktemp -d "${RUNNER_TEMP}/cosign.XXXXXX")"
+          TMP_KEY="${COSIGN_DIR}/cosign.key"
+          TMP_PUB="${COSIGN_DIR}/cosign.pub"
 
-          VAULT_RESP=$(curl -sSL --request POST \
-            --data "{\"role\": \"badanie-potok\", \"jwt\": \"$GH_TOKEN\"}" \
-            "$VAULT_ADDR/v1/auth/github-jwt/login")
+          echo "COSIGN_DIR=$COSIGN_DIR" >> "$GITHUB_ENV"
+          echo "COSIGN_PUB=$TMP_PUB" >> "$GITHUB_ENV"
 
-          VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
+          echo "1. Pobieranie tokenu OIDC GitHub..."
+
+          GH_TOKEN="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${VAULT_ADDR}" \
+            | jq -er '.value'
+          )"
+
+          echo "2. Logowanie OIDC do Vault..."
+
+          VAULT_RESP="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --data "$(jq -nc \
+                --arg role "badanie-potok" \
+                --arg jwt "$GH_TOKEN" \
+                '{role:$role,jwt:$jwt}')" \
+              "${VAULT_ADDR}/v1/auth/github-jwt/login"
+          )"
+
+          VAULT_TOKEN="$(jq -er '.auth.client_token' <<< "$VAULT_RESP")"
           echo "::add-mask::$VAULT_TOKEN"
 
-          echo "2. Pobieranie klucza prywatnego z Vault..."
-          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-          
-          TMP_KEY="vault-cosign.key"
-          TMP_PUB="vault-cosign.pub"
-          
-          echo "$SECRET_JSON" | jq -r '.data.data.key // empty' > "$TMP_KEY"
-          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
+          echo "3. Pobieranie klucza z Vault..."
+
+          SECRET_JSON="$(
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 5 \
+              --max-time 15 \
+              -H "X-Vault-Token: $VAULT_TOKEN" \
+              "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
+          )"
+
+          jq -er '.data.data.key' <<< "$SECRET_JSON" > "$TMP_KEY"
+
+          COSIGN_PASSWORD="$(
+            jq -er '
+              .data.data.password //
+              .data.data.cosign_password //
+              .data.data.pass
+            ' <<< "$SECRET_JSON"
+          )"
+
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
-          echo "3. Generowanie klucza publicznego..."
-          cosign public-key --key "$TMP_KEY" --outfile "$TMP_PUB"
+          chmod 600 "$TMP_KEY"
 
-          echo "4. Weryfikacja podpisu..."
-          cosign verify --key "$TMP_PUB" "$OBRAZ_TESTOWY"
+          echo "4. Generowanie klucza publicznego..."
 
-          echo "5. Weryfikacja atestacji SBOM..."
-          cosign verify-attestation --key "$TMP_PUB" --type cyclonedx "$OBRAZ_TESTOWY"
+          cosign public-key \
+            --key "$TMP_KEY" \
+            --outfile "$TMP_PUB"
 
-          echo "6. Gotowe. Czyszczenie..."
-          rm -f "$TMP_KEY" "$TMP_PUB"
-          rm -rf "$SIGSTORE_CACHE_DIR"
-          exit 0
+          # Klucz prywatny od tego miejsca nie jest już potrzebny.
+          rm -f "$TMP_KEY"
+          unset COSIGN_PASSWORD
+
+          test -s "$TMP_PUB"
+
+      - name: Uwierzytelnianie do GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+
+          printf '%s' "$GHCR_TOKEN" |
+            cosign login ghcr.io \
+              -u "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Weryfikacja podpisu
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "Weryfikacja podpisu obrazu..."
+
+          timeout -k 5s 45s \
+            cosign verify \
+              --timeout 30s \
+              --key "$COSIGN_PUB" \
+              "$OBRAZ_TESTOWY"
+
+          echo "Podpis OK"
+
+      - name: Weryfikacja atestacji SBOM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "Weryfikacja atestacji CycloneDX..."
+
+          timeout -k 5s 45s \
+            cosign verify-attestation \
+              --timeout 30s \
+              --key "$COSIGN_PUB" \
+              --type cyclonedx \
+              "$OBRAZ_TESTOWY"
+
+          echo "Atestacja OK"
+
+      - name: Czyszczenie
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${COSIGN_DIR:-}" ]]; then
+            rm -rf "$COSIGN_DIR"
+          fi
