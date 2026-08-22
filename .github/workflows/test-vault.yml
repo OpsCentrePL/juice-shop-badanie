@@ -1,6 +1,16 @@
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+# ... (reszta pliku bez zmian)
 name: Debug-Brama
 
 on:
+  push:
+    branches:
+      - debug  # Zmień na dokładną nazwę swojej gałęzi, np. debug/brama
   workflow_dispatch: # Pozwala na reczne odpalenie z poziomu interfejsu GitHuba
 
 permissions:
