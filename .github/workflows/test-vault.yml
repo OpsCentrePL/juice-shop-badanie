@@ -385,6 +385,9 @@ jobs:
           cosign public-key --key cosign.key --outfile cosign.pub
           rm -f cosign.key
 
+          # Uwierzytelnienie do GHCR (naprawia błąd UNAUTHORIZED)
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
           cosign verify --key cosign.pub "$SKROT"
