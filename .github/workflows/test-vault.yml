@@ -177,6 +177,8 @@ jobs:
   sbom:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
+    container:
+      image: node:22-bookworm
     steps:
       - name: Wygeneruj SBOM (CycloneDX)
         uses: anchore/sbom-action@v0
@@ -376,7 +378,27 @@ jobs:
     needs: [srodowisko-efemeryczne]
     timeout-minutes: 10
     continue-on-error: true
+    container:
+      image: ubuntu:24.04
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock
+    env:
+      DOCKER_CONFIG: /tmp/docker-zap
     steps:
+      - name: Przygotuj Docker CLI w kontenerze joba
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+          rm -rf "$DOCKER_CONFIG"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+
+          docker version
+
       - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
         uses: zaproxy/action-baseline@v0.14.0
         with:
