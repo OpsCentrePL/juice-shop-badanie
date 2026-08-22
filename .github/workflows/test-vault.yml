@@ -108,7 +108,6 @@ jobs:
       image: aquasec/trivy:0.58.1
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
       - run: |
           trivy config --format sarif --output trivy-iac.sarif --exit-code 0 .
       - uses: actions/upload-artifact@v4
@@ -259,6 +258,7 @@ jobs:
   srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
     needs: [podpis]
+    timeout-minutes: 5
     container:
       image: hashicorp/vault:1.18
     environment:
@@ -310,11 +310,9 @@ jobs:
                       port:
                         number: 3000
           EOF
-          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "$NAZWA" --timeout=180s
+          kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "$NAZWA" --timeout=120s
       - if: always()
-        run: |
-          rm -f /tmp/kubeconfig
-          chmod -R 777 . "$GITHUB_WORKSPACE"
+        run: rm -f /tmp/kubeconfig
 
   # ============================ TESTOWANIE DAST ============================
   zap-krzyzowy:
@@ -365,14 +363,13 @@ jobs:
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete service "$NAZWA" --ignore-not-found
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "$NAZWA" --ignore-not-found
       - if: always()
-        run: |
-          rm -f /tmp/kubeconfig
-          chmod -R 777 . "$GITHUB_WORKSPACE"
+        run: rm -f /tmp/kubeconfig
 
   # ========================== [E] BRAMKA PRZEDWDROZENIOWA ==========================
   brama-integralnosci:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz, podpis, trivy-obraz-krzyzowy]
+    timeout-minutes: 3
     container:
       image: alpine:3.20
     steps:
@@ -389,8 +386,6 @@ jobs:
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
           cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # =============================== WDROZENIE ===============================
   wdrozenie:
@@ -421,6 +416,4 @@ jobs:
           kubectl -n "$K8S_NAMESPACE" set image deployment/juice-shop juice-shop="$OBRAZ:$ZNACZNIK"
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
       - if: always()
-        run: |
-          rm -f /tmp/kubeconfig
-          chmod -R 777 . "$GITHUB_WORKSPACE"
+        run: rm -f /tmp/kubeconfig
