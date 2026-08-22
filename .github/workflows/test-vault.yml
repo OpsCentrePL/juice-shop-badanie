@@ -190,18 +190,18 @@ jobs:
   sbom:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
-    container:
-      image: anchore/syft:v1.19.0
     steps:
       - name: Wygeneruj SBOM (CycloneDX)
-        run: |
-          syft "$OBRAZ@${{ needs.obraz.outputs.digest }}" -o cyclonedx-json=sbom.cdx.json
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.OBRAZ }}@${{ needs.obraz.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
           path: sbom.cdx.json
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   podpis:
     runs-on: [self-hosted, Linux, X64]
@@ -239,7 +239,6 @@ jobs:
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
-          # Generowanie klucza publicznego
           cosign public-key --key cosign.key --outfile cosign.pub
 
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
@@ -340,7 +339,7 @@ jobs:
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
-    needs: [zap-krzyzowy]
+    needs: [srodowisko-efemeryczne, zap-krzyzowy]
     if: always()
     container:
       image: hashicorp/vault:1.18
