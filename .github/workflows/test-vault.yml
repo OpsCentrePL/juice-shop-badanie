@@ -150,12 +150,13 @@ jobs:
 
           echo "Weryfikacja atestacji CycloneDX..."
 
-          timeout -k 5s 45s \
-            cosign verify-attestation \
-              --timeout 30s \
-              --key "$COSIGN_PUB" \
-              --type cyclonedx \
-              "$OBRAZ_TESTOWY"
+          timeout -k 5s -s QUIT 30s \
+          cosign verify-attestation \
+            -d \
+            --timeout 20s \
+            --key "$COSIGN_PUB" \
+            --type cyclonedx \
+            "$OBRAZ_TESTOWY"
 
           echo "Atestacja OK"
 
