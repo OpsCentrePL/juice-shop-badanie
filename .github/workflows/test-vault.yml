@@ -1,13 +1,10 @@
-
-
-# ... (reszta pliku bez zmian)
 name: Debug-Brama
 
 on:
   push:
     branches:
-      - debug  # Zmień na dokładną nazwę swojej gałęzi, np. debug/brama
-  workflow_dispatch: # Pozwala na reczne odpalenie z poziomu interfejsu GitHuba
+      - debug
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -15,17 +12,15 @@ permissions:
   packages: read
 
 env:
-  # Hardcoded obraz z Twojego zrzutu ekranu
   OBRAZ_TESTOWY: ghcr.io/opscentrepl/juice-shop-badanie@sha256:d103f943b6fc74baa630706c4ce5d2dab14d99a8d9b701e7c539dea12a60b635
   VAULT_ADDR: https://vault.opscentre.pl
 
 jobs:
   brama-izolowana:
-    # BRAK DYREKTYWY 'container' - uruchamiamy bezposrednio na hoście runnera
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     steps:
-      - name: Instalacja Cosign (oficjalna akcja zamiast wget)
+      - name: Instalacja Cosign
         uses: sigstore/cosign-installer@v3.5.0
         with:
           cosign-release: 'v2.4.1'
@@ -50,14 +45,15 @@ jobs:
           echo "2. Pobieranie klucza publicznego..."
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
           
-          # Ponieważ do weryfikacji potrzebny jest tylko klucz publiczny, wyciągamy go z klucza prywatnego (Cosign to wspiera) lub pobieramy
-          echo "$SECRET_JSON" | jq -r '.data.data.key // empty' > cosign.pub
+          # Zapisujemy do unikalnego pliku, aby ominąć problem z uprawnieniami po poprzednich kontenerach
+          TMP_KEY="vault-cosign.pub"
+          echo "$SECRET_JSON" | jq -r '.data.data.key // empty' > "$TMP_KEY"
 
           echo "3. Weryfikacja podpisu..."
-          cosign verify --key cosign.pub "$OBRAZ_TESTOWY"
+          cosign verify --key "$TMP_KEY" "$OBRAZ_TESTOWY"
 
           echo "4. Weryfikacja atestacji SBOM..."
-          cosign verify-attestation --key cosign.pub --type cyclonedx "$OBRAZ_TESTOWY"
+          cosign verify-attestation --key "$TMP_KEY" --type cyclonedx "$OBRAZ_TESTOWY"
 
           echo "5. Gotowe. Czyszczenie..."
-          rm -f cosign.pub
+          rm -f "$TMP_KEY"
