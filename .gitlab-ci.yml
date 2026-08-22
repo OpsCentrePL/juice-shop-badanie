@@ -188,7 +188,7 @@ obraz:
   needs: [budowanie]
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build -t "$OBRAZ:$ZNACZNIK" .
+    - docker build --no-cache -t "$OBRAZ:$ZNACZNIK" .
     - docker push "$OBRAZ:$ZNACZNIK"
     - docker image inspect "$OBRAZ:$ZNACZNIK" --format '{{index .RepoDigests 0}}' > skrot-obrazu.txt
   artifacts:
