@@ -417,3 +417,4 @@ jobs:
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/juice-shop --timeout=180s
       - if: always()
         run: rm -f /tmp/kubeconfig
+        
