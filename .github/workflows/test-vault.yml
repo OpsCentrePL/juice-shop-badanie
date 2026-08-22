@@ -29,7 +29,7 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Pobierz klucz publiczny z Vault i weryfikuj
+      - name: Pobierz klucz z Vault, wygeneruj publiczny i weryfikuj
         run: |
           echo "1. Uwierzytelnianie OIDC do Vaulta..."
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -42,18 +42,25 @@ jobs:
           VAULT_TOKEN=$(echo "$VAULT_RESP" | jq -r .auth.client_token)
           echo "::add-mask::$VAULT_TOKEN"
 
-          echo "2. Pobieranie klucza publicznego..."
+          echo "2. Pobieranie klucza prywatnego z Vault..."
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
           
-          # Zapisujemy do unikalnego pliku, aby ominąć problem z uprawnieniami po poprzednich kontenerach
-          TMP_KEY="vault-cosign.pub"
+          TMP_KEY="vault-cosign.key"
+          TMP_PUB="vault-cosign.pub"
+          
           echo "$SECRET_JSON" | jq -r '.data.data.key // empty' > "$TMP_KEY"
+          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
+          export COSIGN_PASSWORD
+          echo "::add-mask::$COSIGN_PASSWORD"
 
-          echo "3. Weryfikacja podpisu..."
-          cosign verify --key "$TMP_KEY" "$OBRAZ_TESTOWY"
+          echo "3. Generowanie klucza publicznego..."
+          cosign public-key --key "$TMP_KEY" --outfile "$TMP_PUB"
 
-          echo "4. Weryfikacja atestacji SBOM..."
-          cosign verify-attestation --key "$TMP_KEY" --type cyclonedx "$OBRAZ_TESTOWY"
+          echo "4. Weryfikacja podpisu..."
+          cosign verify --key "$TMP_PUB" "$OBRAZ_TESTOWY"
 
-          echo "5. Gotowe. Czyszczenie..."
-          rm -f "$TMP_KEY"
+          echo "5. Weryfikacja atestacji SBOM..."
+          cosign verify-attestation --key "$TMP_PUB" --type cyclonedx "$OBRAZ_TESTOWY"
+
+          echo "6. Gotowe. Czyszczenie..."
+          rm -f "$TMP_KEY" "$TMP_PUB"
