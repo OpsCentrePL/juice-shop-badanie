@@ -172,7 +172,7 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          DOCKER_CONFIG="$(
+          export DOCKER_CONFIG="$(
             mktemp -d "${RUNNER_TEMP}/docker.XXXXXX"
           )"
 
@@ -182,6 +182,8 @@ jobs:
             cosign login ghcr.io \
               -u "${{ github.actor }}" \
               --password-stdin
+
+          test -s "${DOCKER_CONFIG}/config.json"
 
           echo "Logowanie do GHCR zakończone."
 
