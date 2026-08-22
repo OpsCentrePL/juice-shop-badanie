@@ -132,7 +132,7 @@ jobs:
         with:
           name: skrot-obrazu
           path: skrot-obrazu.txt
-      - if: always()
+      - if: always() 
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
   trivy-obraz-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
