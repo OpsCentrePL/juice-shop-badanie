@@ -33,7 +33,7 @@ jobs:
 
       - name: Zbuduj i wypchnij obraz
         run: |
-          docker build -t "$OBRAZ:$ZNACZNIK" .
+          docker build --no-cache -t "$OBRAZ:$ZNACZNIK" .
           docker push "$OBRAZ:$ZNACZNIK"
 
   wdrozenie:
