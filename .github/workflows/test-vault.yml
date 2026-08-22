@@ -379,34 +379,72 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     container:
-      image: ubuntu:24.04
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
-    env:
-      DOCKER_CONFIG: /tmp/docker-zap
+      # Oficjalny obraz ZAP z Docker Hub. ZAP uruchamia się bezpośrednio
+      # jako kontener joba — bez zagnieżdżonego `docker run`.
+      image: zaproxy/zap-stable
+      options: --user 0:0 --no-healthcheck
     steps:
-      - name: Przygotuj Docker CLI w kontenerze joba
+      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
+        id: zap
         shell: bash
         run: |
-          set -Eeuo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends docker.io ca-certificates
-          rm -rf /var/lib/apt/lists/*
+          set -uo pipefail
 
-          rm -rf "$DOCKER_CONFIG"
-          mkdir -p "$DOCKER_CONFIG"
-          printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+          echo "Skanowanie: $DAST_TARGET_URL"
 
-          docker version
+          # zap-baseline.py działający w obrazie ZAP zapisuje pliki do /zap/wrk.
+          # Kody: 0 = brak problemów, 1 = FAIL, 2 = WARN, 3 = błąd wykonania.
+          set +e
+          zap-baseline.py \
+            -t "$DAST_TARGET_URL" \
+            -a \
+            -J report.json \
+            -w report.md \
+            -r report.html
+          ZAP_RC=$?
+          set -e
 
-      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
-        uses: zaproxy/action-baseline@v0.14.0
+          echo "ZAP_EXIT_CODE=$ZAP_RC" >> "$GITHUB_ENV"
+          echo "Kod zakończenia ZAP: $ZAP_RC"
+
+          echo "Wygenerowane raporty:"
+          ls -lh /zap/wrk/report.json /zap/wrk/report.md /zap/wrk/report.html
+
+          # Wyniki bezpieczeństwa (1/2) nie przerywają etapu — są częścią badania.
+          # Kod 3 oznacza błąd techniczny skanera i zostanie obsłużony po zapisaniu artefaktów.
+          exit 0
+
+      - name: Zapisz raport ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          target: ${{ env.DAST_TARGET_URL }}
-          rules_file_name: ''
-          cmd_options: '-a'
-          allow_issue_writing: false
-          artifact_name: zap-report
+          name: zap-report
+          path: |
+            /zap/wrk/report.html
+            /zap/wrk/report.md
+            /zap/wrk/report.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sprawdź poprawność wykonania ZAP
+        if: always()
+        shell: bash
+        run: |
+          case "${ZAP_EXIT_CODE:-3}" in
+            0)
+              echo "ZAP: skan zakończony bez ostrzeżeń."
+              ;;
+            1)
+              echo "ZAP: skan zakończony — wykryto alerty klasy FAIL."
+              ;;
+            2)
+              echo "ZAP: skan zakończony — wykryto alerty klasy WARN."
+              ;;
+            *)
+              echo "::error::ZAP nie wykonał skanu poprawnie (kod ${ZAP_EXIT_CODE:-brak})."
+              exit 1
+              ;;
+          esac
 
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
