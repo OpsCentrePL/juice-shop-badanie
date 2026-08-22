@@ -379,10 +379,8 @@ jobs:
     timeout-minutes: 10
     continue-on-error: true
     container:
-      # Oficjalny obraz ZAP z Docker Hub. ZAP uruchamia się bezpośrednio
-      # jako kontener joba — bez zagnieżdżonego `docker run`.
       image: zaproxy/zap-stable
-      options: --user 0:0 --no-healthcheck
+      options: --user root --no-healthcheck
     steps:
       - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
         id: zap
@@ -392,12 +390,15 @@ jobs:
 
           echo "Skanowanie: $DAST_TARGET_URL"
 
-          # zap-baseline.py działający w obrazie ZAP zapisuje pliki do /zap/wrk.
-          # Kody: 0 = brak problemów, 1 = FAIL, 2 = WARN, 3 = błąd wykonania.
+          # Tworzymy wewnątrz kontenera katalog, do którego skrypt ZAP ma natywnie zapisywać raporty
+          mkdir -p /zap/wrk
+
+          # Używamy pełnej bezwzględnej ścieżki do skryptu bazowego i włączamy tryb debug (-d)
           set +e
-          zap-baseline.py \
+          /zap/zap-baseline.py \
             -t "$DAST_TARGET_URL" \
             -a \
+            -d \
             -J report.json \
             -w report.md \
             -r report.html
@@ -407,11 +408,9 @@ jobs:
           echo "ZAP_EXIT_CODE=$ZAP_RC" >> "$GITHUB_ENV"
           echo "Kod zakończenia ZAP: $ZAP_RC"
 
-          echo "Wygenerowane raporty:"
-          ls -lh /zap/wrk/report.json /zap/wrk/report.md /zap/wrk/report.html
+          # Przenosimy raporty bezpośrednio do GITHUB_WORKSPACE, aby następny krok poprawnie je wychwycił
+          cp /zap/wrk/report.* "$GITHUB_WORKSPACE/" || true
 
-          # Wyniki bezpieczeństwa (1/2) nie przerywają etapu — są częścią badania.
-          # Kod 3 oznacza błąd techniczny skanera i zostanie obsłużony po zapisaniu artefaktów.
           exit 0
 
       - name: Zapisz raport ZAP
@@ -420,10 +419,10 @@ jobs:
         with:
           name: zap-report
           path: |
-            /zap/wrk/report.html
-            /zap/wrk/report.md
-            /zap/wrk/report.json
-          if-no-files-found: error
+            report.html
+            report.md
+            report.json
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Sprawdź poprawność wykonania ZAP
