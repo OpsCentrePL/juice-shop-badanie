@@ -231,11 +231,10 @@ jobs:
           fi
           echo "::add-mask::$VAULT_TOKEN"
 
-          KEY_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign/key")
-          PASS_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign/password")
+          SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
 
-          echo "$KEY_JSON" | jq -r '.data.data.value // .data.data.key // (.data.data|to_entries[0]?.value) // empty' > cosign.key
-          COSIGN_PASSWORD=$(echo "$PASS_JSON" | jq -r '.data.data.value // .data.data.password // (.data.data|to_entries[0]?.value) // empty')
+          echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
+          COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
 
