@@ -1,4 +1,4 @@
-name: Debug-Brama
+name: Debug-ZAP
 
 on:
   push:
@@ -6,317 +6,79 @@ on:
       - debug
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
-  packages: read
-
-env:
-  OBRAZ_TESTOWY: ghcr.io/opscentrepl/juice-shop-badanie@sha256:d103f943b6fc74baa630706c4ce5d2dab14d99a8d9b701e7c539dea12a60b635
-  VAULT_ADDR: https://vault.opscentre.pl
-
 jobs:
-  brama-izolowana:
+  zap-izolowany:
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 5
-
+    timeout-minutes: 10
+    container:
+      # Używamy oficjalnego obrazu ZAP, wymuszając uprawnienia roota, 
+      # aby uniknąć problemów z zapisem w /zap/wrk
+      image: zaproxy/zap-stable
+      options: --user root --no-healthcheck
     steps:
-      # ------------------------------------------------------------
-      # 1. Instalacja Cosign
-      # ------------------------------------------------------------
-      - name: Instalacja Cosign
-        uses: sigstore/cosign-installer@v3.10.1
+      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
+        id: zap
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # Hardkodowany, bezpieczny adres do przetestowania działania samego skanera
+          DAST_TARGET_URL="https://example.com"
+          
+          echo "Rozpoczynam skanowanie testowe adresu: $DAST_TARGET_URL"
+
+          # Tworzymy wewnątrz kontenera katalog, do którego skrypt ZAP ma natywnie zapisywać raporty
+          mkdir -p /zap/wrk
+
+          # Używamy pełnej bezwzględnej ścieżki do skryptu bazowego i włączamy tryb debug (-d)
+          set +e
+          /zap/zap-baseline.py \
+            -t "$DAST_TARGET_URL" \
+            -a \
+            -d \
+            -J report.json \
+            -w report.md \
+            -r report.html
+          ZAP_RC=$?
+          set -e
+
+          echo "ZAP_EXIT_CODE=$ZAP_RC" >> "$GITHUB_ENV"
+          echo "Kod zakończenia ZAP: $ZAP_RC"
+
+          # Przenosimy raporty bezpośrednio do GITHUB_WORKSPACE, aby GitHub Actions miał do nich dostęp
+          cp /zap/wrk/report.* "$GITHUB_WORKSPACE/" || true
+
+          # Wymuszamy exit 0, aby skaner nie "wywalił" joba, zanim przeanalizujemy kod wyjścia
+          exit 0
+
+      - name: Zapisz raport ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          cosign-release: "v2.6.4"
+          name: zap-report-debug
+          path: |
+            report.html
+            report.md
+            report.json
+          if-no-files-found: warn
+          retention-days: 7
 
-      # ------------------------------------------------------------
-      # 2. Informacje diagnostyczne
-      # ------------------------------------------------------------
-      - name: Sprawdź wersję
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          cosign version
-
-          echo
-          echo "timeout:"
-          command -v timeout
-          timeout --version | head -n 1
-
-      # ------------------------------------------------------------
-      # 3. Pobranie klucza z Vault przez GitHub OIDC
-      # ------------------------------------------------------------
-      - name: Pobierz klucz publiczny
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          COSIGN_DIR="$(mktemp -d "${RUNNER_TEMP}/cosign.XXXXXX")"
-
-          TMP_KEY="${COSIGN_DIR}/cosign.key"
-          TMP_PUB="${COSIGN_DIR}/cosign.pub"
-
-          echo "COSIGN_DIR=$COSIGN_DIR" >> "$GITHUB_ENV"
-          echo "COSIGN_PUB=$TMP_PUB" >> "$GITHUB_ENV"
-
-          echo "1. Pobieranie tokenu OIDC GitHub..."
-
-          GH_TOKEN="$(
-            curl \
-              --fail-with-body \
-              --silent \
-              --show-error \
-              --connect-timeout 5 \
-              --max-time 15 \
-              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${VAULT_ADDR}" \
-            | jq -er '.value'
-          )"
-
-          echo "::add-mask::$GH_TOKEN"
-
-          echo "2. Logowanie OIDC do Vault..."
-
-          VAULT_RESP="$(
-            curl \
-              --fail-with-body \
-              --silent \
-              --show-error \
-              --connect-timeout 5 \
-              --max-time 15 \
-              --request POST \
-              --header "Content-Type: application/json" \
-              --data "$(
-                jq -nc \
-                  --arg role "badanie-potok" \
-                  --arg jwt "$GH_TOKEN" \
-                  '{role:$role,jwt:$jwt}'
-              )" \
-              "${VAULT_ADDR}/v1/auth/github-jwt/login"
-          )"
-
-          VAULT_TOKEN="$(
-            jq -er '.auth.client_token' <<< "$VAULT_RESP"
-          )"
-
-          echo "::add-mask::$VAULT_TOKEN"
-
-          echo "3. Pobieranie klucza Cosign z Vault..."
-
-          SECRET_JSON="$(
-            curl \
-              --fail-with-body \
-              --silent \
-              --show-error \
-              --connect-timeout 5 \
-              --max-time 15 \
-              --header "X-Vault-Token: $VAULT_TOKEN" \
-              "${VAULT_ADDR}/v1/kv/data/badanie/cosign"
-          )"
-
-          jq -er \
-            '.data.data.key // empty' \
-            <<< "$SECRET_JSON" \
-            > "$TMP_KEY"
-
-          COSIGN_PASSWORD="$(
-            jq -er '
-              .data.data.password //
-              .data.data.cosign_password //
-              .data.data.pass //
-              empty
-            ' <<< "$SECRET_JSON"
-          )"
-
-          echo "::add-mask::$COSIGN_PASSWORD"
-
-          export COSIGN_PASSWORD
-
-          chmod 600 "$TMP_KEY"
-
-          if [[ ! -s "$TMP_KEY" ]]; then
-            echo "ERROR: Vault nie zwrócił klucza Cosign."
-            exit 1
-          fi
-
-          echo "4. Generowanie klucza publicznego..."
-
-          cosign public-key \
-            --key "$TMP_KEY" \
-            --outfile "$TMP_PUB"
-
-          if [[ ! -s "$TMP_PUB" ]]; then
-            echo "ERROR: Nie udało się wygenerować klucza publicznego."
-            exit 1
-          fi
-
-          #
-          # Klucz prywatny nie jest już potrzebny.
-          #
-          rm -f "$TMP_KEY"
-
-          unset COSIGN_PASSWORD
-          unset GH_TOKEN
-          unset VAULT_TOKEN
-
-          echo "Klucz publiczny przygotowany."
-
-      # ------------------------------------------------------------
-      # 4. Tymczasowe uwierzytelnienie do GHCR
-      # ------------------------------------------------------------
-      - name: Uwierzytelnianie do GHCR
-        shell: bash
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -Eeuo pipefail
-
-          export DOCKER_CONFIG="$(
-            mktemp -d "${RUNNER_TEMP}/docker.XXXXXX"
-          )"
-
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-
-          printf '%s' "$GHCR_TOKEN" |
-            cosign login ghcr.io \
-              -u "${{ github.actor }}" \
-              --password-stdin
-
-          test -s "${DOCKER_CONFIG}/config.json"
-
-          echo "Logowanie do GHCR zakończone."
-
-      # ------------------------------------------------------------
-      # 5. Weryfikacja podpisu obrazu
-      # ------------------------------------------------------------
-      - name: Weryfikacja podpisu
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "Weryfikacja podpisu obrazu..."
-
-          VERIFY_RESULT="${RUNNER_TEMP}/cosign-verify.json"
-
-          set +e
-
-          timeout \
-            --signal=TERM \
-            --kill-after=5s \
-            45s \
-            cosign verify \
-              --timeout 30s \
-              --key "$COSIGN_PUB" \
-              "$OBRAZ_TESTOWY" \
-              > "$VERIFY_RESULT"
-
-          STATUS=$?
-
-          set -e
-
-          case "$STATUS" in
-            0)
-              echo "Podpis OK."
-              echo "Rozmiar wyniku Cosign: $(wc -c < "$VERIFY_RESULT") B"
-              ;;
-
-            124)
-              echo "ERROR: cosign verify przekroczył timeout 45 s."
-              exit 1
-              ;;
-
-            137)
-              echo "ERROR: cosign verify został zabity po przekroczeniu timeoutu."
-              exit 1
-              ;;
-
-            *)
-              echo "ERROR: cosign verify zakończył się kodem $STATUS."
-              exit "$STATUS"
-              ;;
-          esac
-
-      # ------------------------------------------------------------
-      # 6. Weryfikacja atestacji SBOM
-      # ------------------------------------------------------------
-      - name: Weryfikacja atestacji SBOM
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "Weryfikacja atestacji CycloneDX..."
-
-          ATTESTATION_RESULT="${RUNNER_TEMP}/cosign-attestation.json"
-
-          START_TIME="$(date +%s)"
-
-          set +e
-
-          timeout \
-            --signal=TERM \
-            --kill-after=5s \
-            45s \
-            cosign verify-attestation \
-              --timeout 30s \
-              --key "$COSIGN_PUB" \
-              --type cyclonedx \
-              "$OBRAZ_TESTOWY" \
-              > "$ATTESTATION_RESULT"
-
-          STATUS=$?
-
-          set -e
-
-          END_TIME="$(date +%s)"
-          ELAPSED="$((END_TIME - START_TIME))"
-
-          echo "Czas wykonania: ${ELAPSED}s"
-          echo "Kod zakończenia: $STATUS"
-
-          case "$STATUS" in
-            0)
-              echo "Atestacja SBOM OK."
-              echo "Rozmiar wyniku Cosign: $(wc -c < "$ATTESTATION_RESULT") B"
-              ;;
-
-            124)
-              echo "ERROR: cosign verify-attestation przekroczył timeout 45 s."
-              exit 1
-              ;;
-
-            137)
-              echo "ERROR: cosign verify-attestation został zabity po przekroczeniu timeoutu."
-              exit 1
-              ;;
-
-            *)
-              echo "ERROR: cosign verify-attestation zakończył się kodem $STATUS."
-              exit "$STATUS"
-              ;;
-          esac
-
-      # ------------------------------------------------------------
-      # 7. Czyszczenie
-      # ------------------------------------------------------------
-      - name: Czyszczenie
+      - name: Sprawdź poprawność wykonania ZAP
         if: always()
         shell: bash
         run: |
-          set +e
-
-          echo "Czyszczenie plików tymczasowych..."
-
-          if [[ -n "${COSIGN_DIR:-}" ]]; then
-            rm -rf "$COSIGN_DIR"
-          fi
-
-          if [[ -n "${DOCKER_CONFIG:-}" ]]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
-
-          rm -f \
-            "${RUNNER_TEMP}/cosign-verify.json" \
-            "${RUNNER_TEMP}/cosign-attestation.json"
-
-          echo "Czyszczenie zakończone."
+          case "${ZAP_EXIT_CODE:-3}" in
+            0)
+              echo "ZAP: Skan zakończony pomyślnie, brak ostrzeżeń."
+              ;;
+            1)
+              echo "ZAP: Skan zakończony — wykryto alerty bezpieczeństwa (FAIL)."
+              ;;
+            2)
+              echo "ZAP: Skan zakończony — wykryto ostrzeżenia (WARN)."
+              ;;
+            *)
+              echo "::error::ZAP nie wykonał skanu poprawnie (kod błędu: ${ZAP_EXIT_CODE:-brak}). Skrypt nie uruchomił się lub wystąpił błąd sieciowy."
+              exit 1
+              ;;
+          esac
