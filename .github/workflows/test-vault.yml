@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - badanie/wzorzec
+      - badanie/referencyjny
+      - badanier
   workflow_dispatch:
 
 permissions:
