@@ -120,6 +120,7 @@ jobs:
       - if: always()
         run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
+        
   # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
   obraz:
     runs-on: [self-hosted, Linux, X64]
