@@ -1,5 +1,4 @@
 name: badanie-R
-
 on:
   push:
     branches:
@@ -7,14 +6,12 @@ on:
       - badanie/referencyjny
       - badanier
   workflow_dispatch:
-
 permissions:
   id-token: write
   contents: read
   packages: write
   security-events: write
   attestations: write
-
 env:
   OBRAZ: ghcr.io/opscentrepl/juice-shop-badanie
   ZNACZNIK: ${{ github.sha }}
@@ -22,7 +19,6 @@ env:
   K8S_NAMESPACE: badanie-prod
   K8S_NAMESPACE_EFEMERYCZNY: badanie-efemeryczne
   DAST_TARGET_URL: https://owasp-gh-${{ github.run_id }}.opscentre.pl
-
 jobs:
   # ============================= ETAP BUDOWANIA =============================
   budowanie:
@@ -41,7 +37,8 @@ jobs:
             frontend/dist/
           if-no-files-found: error
           retention-days: 1
-
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
   # ========================== [N] ANALIZA NATYWNA ===========================
   sast:
     runs-on: [self-hosted, Linux, X64]
@@ -56,7 +53,6 @@ jobs:
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"
-
   # ==================== [E] KONTROLA KRZYZOWA (KOD I IAC) ====================
   semgrep-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -74,7 +70,6 @@ jobs:
           name: semgrep-sarif
           path: semgrep.sarif
           retention-days: 7
-
   gitleaks-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -93,7 +88,6 @@ jobs:
           name: gitleaks-sarif
           path: gitleaks.sarif
           retention-days: 7
-
   trivy-iac-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -108,7 +102,6 @@ jobs:
           name: trivy-iac-sarif
           path: trivy-iac.sarif
           retention-days: 7
-
   # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
   obraz:
     runs-on: [self-hosted, Linux, X64]
@@ -139,7 +132,8 @@ jobs:
         with:
           name: skrot-obrazu
           path: skrot-obrazu.txt
-
+      - if: always()
+        run: chmod -R 777 . "$GITHUB_WORKSPACE"
   trivy-obraz-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz]
@@ -155,7 +149,6 @@ jobs:
           name: trivy-obraz-sarif
           path: trivy-obraz.sarif
           retention-days: 7
-
   # ============ [N] ATESTACJA NATYWNA (build provenance / Sigstore) ============
   atestacja:
     runs-on: [self-hosted, Linux, X64]
@@ -168,7 +161,6 @@ jobs:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: false
-
   # ============= [E] ZESTAWIENIE KOMPONENTOW (SBOM) I PODPIS (COSIGN) =============
   sbom:
     runs-on: [self-hosted, Linux, X64]
@@ -185,7 +177,6 @@ jobs:
         with:
           name: sbom
           path: sbom.cdx.json
-
   podpis:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz, sbom]
@@ -213,19 +204,14 @@ jobs:
             echo "::error::Błąd logowania do Vault: $VAULT_RESP"; exit 1
           fi
           echo "::add-mask::$VAULT_TOKEN"
-
           SECRET_JSON=$(curl -sSL -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/kv/data/badanie/cosign")
-
           echo "$SECRET_JSON" | jq -r '.data.data.key // .data.data.value // .data.data.cosign_key // empty' > cosign.key
           COSIGN_PASSWORD=$(echo "$SECRET_JSON" | jq -r '.data.data.password // .data.data.cosign_password // .data.data.pass // empty')
           export COSIGN_PASSWORD
           echo "::add-mask::$COSIGN_PASSWORD"
-
           cosign public-key --key cosign.key --outfile cosign.pub
-
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-
           cosign sign --key cosign.key --yes "$SKROT"
           cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
           cosign verify --key cosign.pub "$SKROT"
@@ -235,7 +221,6 @@ jobs:
           path: cosign.pub
       - if: always()
         run: rm -f cosign.key
-
   # ========================= SRODOWISKO EFEMERYCZNE =========================
   srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
@@ -294,26 +279,34 @@ jobs:
                         number: 3000
           EOF
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" rollout status deployment "$NAZWA" --timeout=120s
+          
+          echo "Oczekiwanie na gotowość Ingressu HTTPS..."
+          for i in $(seq 1 30); do
+            HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "$DAST_TARGET_URL" || true)
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "Aplikacja pod adresem $DAST_TARGET_URL odpowiada poprawnie (HTTP $HTTP_CODE)."
+              break
+            fi
+            echo "Próba $i/30: HTTP $HTTP_CODE, czekam 3s..."
+            sleep 3
+          done
       - if: always()
         run: rm -f /tmp/kubeconfig
-
   # ============================ TESTOWANIE DAST ============================
   zap-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     needs: [srodowisko-efemeryczne]
-    container:
-      image: ghcr.io/zaproxy/zaproxy:2.16.0
+    timeout-minutes: 10
     continue-on-error: true
     steps:
-      - run: |
-          mkdir -p /zap/wrk && cd /zap/wrk
-          zap-baseline.py -t "$DAST_TARGET_URL" -J zap.json -r zap.html || true
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
+        uses: zaproxy/action-baseline@v0.14.0
         with:
-          name: zap-report
-          path: /zap/wrk/zap.json
-
+          target: ${{ env.DAST_TARGET_URL }}
+          rules_file_name: ''
+          cmd_options: '-a'
+          allow_issue_writing: false
+          artifact_name: zap-report
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
     runs-on: [self-hosted, Linux, X64]
@@ -345,7 +338,6 @@ jobs:
           kubectl -n "$K8S_NAMESPACE_EFEMERYCZNY" delete deployment "$NAZWA" --ignore-not-found
       - if: always()
         run: rm -f /tmp/kubeconfig
-
   # ========================== [E] BRAMKA PRZEDWDROZENIOWA ==========================
   brama-integralnosci:
     runs-on: [self-hosted, Linux, X64]
@@ -364,7 +356,6 @@ jobs:
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
           cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
-
   # =============================== WDROZENIE ===============================
   wdrozenie:
     runs-on: [self-hosted, Linux, X64]
