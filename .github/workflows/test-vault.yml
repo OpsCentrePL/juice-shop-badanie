@@ -206,6 +206,9 @@ jobs:
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
       - name: Pobierz klucz Cosign z Vault i podpisz
+        env:
+          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
+          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
@@ -225,10 +228,9 @@ jobs:
           echo "::add-mask::$COSIGN_PASSWORD"
 
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-
           cosign sign --key cosign.key --yes "$SKROT"
           cosign attest --key cosign.key --predicate sbom.cdx.json --type cyclonedx --yes "$SKROT"
+          exit 0
       - if: always()
         run: rm -f cosign.key
 
@@ -367,6 +369,9 @@ jobs:
           wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
           chmod +x /usr/local/bin/cosign
       - name: Pobierz klucz z Vault i zweryfikuj artefakt
+        env:
+          COSIGN_REGISTRY_USERNAME: ${{ github.actor }}
+          COSIGN_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
@@ -385,14 +390,12 @@ jobs:
           cosign public-key --key cosign.key --outfile cosign.pub
           rm -f cosign.key
 
-          # Uwierzytelnienie do GHCR (naprawia błąd UNAUTHORIZED)
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-
           SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
           echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
           cosign verify-attestation --key cosign.pub --type cyclonedx "$SKROT"
+          exit 0
       - if: always()
         run: rm -f cosign.key cosign.pub
 
