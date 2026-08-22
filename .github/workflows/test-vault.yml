@@ -25,12 +25,11 @@ jobs:
         with:
           cosign-release: 'v2.4.1'
 
-      - name: Zaloguj do rejestru GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-
       - name: Pobierz klucz z Vault, wygeneruj publiczny i weryfikuj
         run: |
+          # ROZWIĄZANIE PROBLEMU Z ZAWIESZANIEM: wymuszamy użycie świeżego katalogu na cache
+          export SIGSTORE_CACHE_DIR="$(mktemp -d)"
+
           echo "1. Uwierzytelnianie OIDC do Vaulta..."
           GH_TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=$VAULT_ADDR" | jq -r .value)
@@ -56,11 +55,16 @@ jobs:
           echo "3. Generowanie klucza publicznego..."
           cosign public-key --key "$TMP_KEY" --outfile "$TMP_PUB"
 
-          echo "4. Weryfikacja podpisu..."
+          echo "4. Uwierzytelnianie do GHCR..."
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          echo "5. Weryfikacja podpisu..."
           cosign verify --key "$TMP_PUB" "$OBRAZ_TESTOWY"
 
-          echo "5. Weryfikacja atestacji SBOM..."
+          echo "6. Weryfikacja atestacji SBOM..."
           cosign verify-attestation --key "$TMP_PUB" --type cyclonedx "$OBRAZ_TESTOWY"
 
-          echo "6. Gotowe. Czyszczenie..."
+          echo "7. Gotowe. Czyszczenie..."
           rm -f "$TMP_KEY" "$TMP_PUB"
+          rm -rf "$SIGSTORE_CACHE_DIR"
+          exit 0
