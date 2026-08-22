@@ -41,8 +41,6 @@ jobs:
             frontend/dist/
           if-no-files-found: error
           retention-days: 1
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ========================== [N] ANALIZA NATYWNA ===========================
   sast:
@@ -58,8 +56,6 @@ jobs:
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ==================== [E] KONTROLA KRZYZOWA (KOD I IAC) ====================
   semgrep-krzyzowy:
@@ -78,8 +74,6 @@ jobs:
           name: semgrep-sarif
           path: semgrep.sarif
           retention-days: 7
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   gitleaks-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -99,8 +93,6 @@ jobs:
           name: gitleaks-sarif
           path: gitleaks.sarif
           retention-days: 7
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   trivy-iac-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -116,8 +108,6 @@ jobs:
           name: trivy-iac-sarif
           path: trivy-iac.sarif
           retention-days: 7
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ===================== BUDOWA I SKANOWANIE OBRAZU =====================
   obraz:
@@ -149,8 +139,6 @@ jobs:
         with:
           name: skrot-obrazu
           path: skrot-obrazu.txt
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   trivy-obraz-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
@@ -167,8 +155,6 @@ jobs:
           name: trivy-obraz-sarif
           path: trivy-obraz.sarif
           retention-days: 7
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ============ [N] ATESTACJA NATYWNA (build provenance / Sigstore) ============
   atestacja:
@@ -182,8 +168,6 @@ jobs:
           subject-name: ${{ env.OBRAZ }}
           subject-digest: ${{ needs.obraz.outputs.digest }}
           push-to-registry: false
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ============= [E] ZESTAWIENIE KOMPONENTOW (SBOM) I PODPIS (COSIGN) =============
   sbom:
@@ -250,9 +234,7 @@ jobs:
           name: cosign-pub
           path: cosign.pub
       - if: always()
-        run: |
-          rm -f cosign.key
-          chmod -R 777 . "$GITHUB_WORKSPACE"
+        run: rm -f cosign.key
 
   # ========================= SRODOWISKO EFEMERYCZNE =========================
   srodowisko-efemeryczne:
@@ -331,8 +313,6 @@ jobs:
         with:
           name: zap-report
           path: /zap/wrk/zap.json
-      - if: always()
-        run: chmod -R 777 . "$GITHUB_WORKSPACE"
 
   # ==================== SPRZATANIE PO SRODOWISKU EFEMERYCZNYM ====================
   usun-srodowisko-efemeryczne:
@@ -371,18 +351,15 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     needs: [obraz, podpis, trivy-obraz-krzyzowy]
     timeout-minutes: 3
-    container:
-      image: alpine:3.20
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: cosign-pub
-      - run: apk add --no-cache curl ca-certificates
-      - run: |
-          wget -qO /usr/local/bin/cosign "https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64"
-          chmod +x /usr/local/bin/cosign
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-          SKROT="$OBRAZ@${{ needs.obraz.outputs.digest }}"
+      - name: Zainstaluj Cosign
+        uses: sigstore/cosign-installer@v3.8.0
+      - name: Weryfikacja integralnosci i atestacji
+        run: |
+          SKROT="${{ env.OBRAZ }}@${{ needs.obraz.outputs.digest }}"
           echo "Weryfikacja podpisu artefaktu przed wdrozeniem produkcyjnym"
           cosign verify --key cosign.pub "$SKROT"
           echo "Weryfikacja atestacji zestawienia komponentow"
