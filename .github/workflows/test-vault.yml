@@ -1,8 +1,4 @@
 
-permissions:
-  id-token: write
-  contents: read
-  packages: read
 
 # ... (reszta pliku bez zmian)
 name: Debug-Brama
