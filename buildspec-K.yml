@@ -1,0 +1,70 @@
+version: 0.2
+
+# WARIANT K (kontrolny) - sekcja 5 dokumentu badawczego.
+# WYŁĄCZNIE budowanie + push obrazu + wdrożenie. Zero kontroli bezpieczeństwa.
+# Cel: czas bazowy do liczenia narzutu (W2) innych wariantów.
+
+env:
+  secrets-manager:
+    SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
+    KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
+  variables:
+    SSH_HOST: "server.mikolajmurawski.pl"
+    SSH_USER: "mikolaj"
+    SSH_PORT: "22"
+    K8S_API_TARGET: "10.200.0.8:6443"
+    LOCAL_TUNNEL_PORT: "16443"
+    K8S_NAMESPACE: "badanie-prod"
+    # TODO: potwierdź te dwie nazwy z k8s/deployment.yaml w repo - jeśli inne, podmień
+    K8S_DEPLOYMENT_NAME: "juice-shop"
+    K8S_CONTAINER_NAME: "juice-shop"
+
+phases:
+  install:
+    commands:
+      - echo "== install: kubectl + przygotowanie SSH =="
+      - curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+      - mkdir -p ~/.ssh
+      - echo "$SSH_PRIVATE_KEY" > ~/.ssh/codebuild_deploy_key
+      - chmod 600 ~/.ssh/codebuild_deploy_key
+      - ssh-keyscan -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts 2>/dev/null
+
+  pre_build:
+    commands:
+      - echo "== pre_build: logowanie do ECR =="
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - echo "== pre_build: tunel SSH do klastra k8s =="
+      - ssh -i ~/.ssh/codebuild_deploy_key -p $SSH_PORT -f -N -o StrictHostKeyChecking=yes -L ${LOCAL_TUNNEL_PORT}:${K8S_API_TARGET} ${SSH_USER}@${SSH_HOST}
+      - sleep 3
+      - echo "$KUBECONFIG_CONTENT" > kubeconfig-aws.yaml
+      # kubeconfig z sekretu wskazuje na 10.200.0.8:6443 bezpośrednio - podmieniamy na tunel lokalny
+      - sed -i "s#https://${K8S_API_TARGET}#https://127.0.0.1:${LOCAL_TUNNEL_PORT}#" kubeconfig-aws.yaml
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - echo "== pre_build: sanity check dostępu (namespaced, nie cluster-scope) =="
+      - kubectl -n $K8S_NAMESPACE auth can-i create deployments
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+      - echo "IMAGE_TAG=$IMAGE_TAG" > image_tag.env
+
+  build:
+    commands:
+      - echo "== build: docker build --no-cache (patrz checklist sekcja 10) =="
+      - source image_tag.env
+      - docker build --no-cache -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest .
+
+  post_build:
+    commands:
+      - echo "== post_build: push obrazu =="
+      - source image_tag.env
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - docker push ${ECR_REPOSITORY_URI}:latest
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - echo "== post_build: wdrożenie (zero kontroli, wariant K) =="
+      - kubectl -n $K8S_NAMESPACE apply -f k8s/deployment.yaml
+      - kubectl -n $K8S_NAMESPACE set image deployment/${K8S_DEPLOYMENT_NAME} ${K8S_CONTAINER_NAME}=${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - kubectl -n $K8S_NAMESPACE rollout status deployment/${K8S_DEPLOYMENT_NAME} --timeout=180s
+      - echo "== gotowe: artefakt wdrożony =="
+
+artifacts:
+  files:
+    - image_tag.env
