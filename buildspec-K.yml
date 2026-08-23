@@ -40,6 +40,7 @@ phases:
       - sleep 3
       - echo "$KUBECONFIG_CONTENT" > kubeconfig-aws.yaml
       - sed -i "s#https://${K8S_API_TARGET}#https://127.0.0.1:${LOCAL_TUNNEL_PORT}#" kubeconfig-aws.yaml
+      - 'sed -i "s|certificate-authority-data:|tls-server-name: ${K8S_API_TARGET%%:*}\n    certificate-authority-data:|" kubeconfig-aws.yaml'
       - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
       - 'echo "pre_build phase - sanity check dostepu (namespaced, nie cluster-scope)"'
       - kubectl -n $K8S_NAMESPACE auth can-i create deployments
