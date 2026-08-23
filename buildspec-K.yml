@@ -18,6 +18,10 @@ env:
     # TODO: potwierdź te dwie nazwy z k8s/deployment.yaml w repo - jeśli inne, podmień
     K8S_DEPLOYMENT_NAME: "juice-shop"
     K8S_CONTAINER_NAME: "juice-shop"
+    # SEC-04 (CWE-798): token osadzony w definicji zadania - defekt wzorcowy,
+    # ta sama wartość co w .gitlab-ci.yml (LEGACY_MONITORING_TOKEN), przeniesiona
+    # tu zgodnie z sekcją 4 dokumentu badawczego. Token pozorny/testowy, nieaktywny.
+    LEGACY_MONITORING_TOKEN: "glpat-a1B2c3D4e5F6g7H8i9J0"
 
 phases:
   install:
