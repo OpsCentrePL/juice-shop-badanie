@@ -28,7 +28,7 @@ phases:
       - mkdir -p ~/.ssh
       - echo "$SSH_PRIVATE_KEY" > ~/.ssh/codebuild_deploy_key
       - chmod 600 ~/.ssh/codebuild_deploy_key
-      - ssh-keyscan -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts 2>/dev/null
+      - ssh-keyscan -T 10 -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts
 
   pre_build:
     commands:
