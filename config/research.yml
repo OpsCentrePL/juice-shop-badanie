@@ -1,0 +1,6 @@
+# DEFEKTY SEC-01 oraz SEC-03 | CWE-798 | oczekiwana faza 3
+chmura:
+  aws_access_key_id: AKIAIOSFODNN7EXAMPLE
+  aws_secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+baza:
+  connection_string: "postgresql://juiceshop:H4slo-Testowe-2026@db.badanie.local:5432/juiceshop"
