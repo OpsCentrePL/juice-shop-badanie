@@ -50,13 +50,13 @@ phases:
   build:
     commands:
       - 'echo "build phase - docker build --no-cache (patrz checklist sekcja 10)"'
-      - source image_tag.env
+      - . image_tag.env
       - docker build --no-cache -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest .
 
   post_build:
     commands:
       - 'echo "post_build phase - push obrazu"'
-      - source image_tag.env
+      - . image_tag.env
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
       - docker push ${ECR_REPOSITORY_URI}:latest
       - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
