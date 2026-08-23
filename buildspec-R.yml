@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Badanie DevSecOps AWS - pipeline wariantu K (kontrolny).
+  CodePipeline + CodeBuild + ECR + CodeConnections.
+  Sekrety (klucz SSH, kubeconfig) tworzone RĘCZNIE poza tym stackiem (Secrets Manager)
+  - patrz README.md. Ten stack tylko nadaje IAM uprawnienia do ich odczytu.
+
+Parameters:
+  GitHubRepositoryId:
+    Type: String
+    Default: "OpsCentrePL/juice-shop-badanie"
+    Description: "owner/repo z sekcji 0 dokumentu badawczego"
+  BranchName:
+    Type: String
+    Default: "main"
+    Description: "Gałąź do zbudowania - patrz sekcja 0: main lub badanie/aws-*"
+  BranchNameN:
+    Type: String
+    Default: "badanie/aws-n"
+    Description: "Gałąź dla wariantu N"
+  BranchNameR:
+    Type: String
+    Default: "badanie/aws-r"
+    Description: "Gałąź dla wariantu R"
+
+Resources:
+
+  # --- Artefakty pipeline'u (wymagane przez CodePipeline) ---
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "juiceshop-badanie-artifacts-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # --- Rejestr obrazów ---
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: "juiceshop-badanie"
+      ImageScanningConfiguration:
+        ScanOnPush: true   # to jest Amazon Inspector / ECR enhanced scanning - patrz wariant N
+
+  # --- Połączenie z GitHub (wymaga jednorazowej autoryzacji w konsoli AWS!) ---
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: "juiceshop-badanie-github"
+      ProviderType: GitHub
+
+  # --- Rola CodeBuild ---
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "juiceshop-codebuild-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: juiceshop-codebuild-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Sid: ArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: ECRAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ECRPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                Resource: !GetAtt ECRRepository.Arn
+              - Sid: Secrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:juiceshop/codebuild-ssh-key-*"
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:juiceshop/k8s-access-*"
+              # Poniższe będą potrzebne w wariancie N/R - zostawione tu żeby nie edytować roli ponownie
+              - Sid: FutureInspectorSecurityHub
+                Effect: Allow
+                Action:
+                  - inspector2:ListFindings
+                  - securityhub:BatchImportFindings
+                  - securityhub:GetFindings
+                Resource: "*"
+              - Sid: FutureSigner
+                Effect: Allow
+                Action:
+                  - signer:SignPayload
+                  - signer:GetRevocationStatus
+                  - signer:DescribeSigningJob
+                  - signer:GetSigningProfile
+                Resource: "*"
+
+  # --- Projekt CodeBuild - wariant K ---
+  CodeBuildProjectK:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: "juiceshop-badanie-K"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-K.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true   # wymagane do `docker build`
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !GetAtt ECRRepository.RepositoryUri
+      TimeoutInMinutes: 30
+
+  # --- Rola CodePipeline ---
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "juiceshop-codepipeline-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: juiceshop-codepipeline-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: !Ref GitHubConnection
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource:
+                  - !GetAtt CodeBuildProjectK.Arn
+                  - !GetAtt CodeBuildProjectN.Arn
+                  - !GetAtt CodeBuildProjectR.Arn
+
+  # --- Pipeline - wariant K ---
+  PipelineK:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "juiceshop-badanie-K"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: !Ref GitHubRepositoryId
+                BranchName: !Ref BranchName
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildK
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectK
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildKOutput
+
+  # --- Projekt CodeBuild - wariant N ---
+  CodeBuildProjectN:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: "juiceshop-badanie-N"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-N.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !GetAtt ECRRepository.RepositoryUri
+      TimeoutInMinutes: 30
+
+  # --- Pipeline - wariant N ---
+  PipelineN:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "juiceshop-badanie-N"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: !Ref GitHubRepositoryId
+                BranchName: !Ref BranchNameN
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildN
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectN
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildNOutput
+
+  # --- Projekt CodeBuild - wariant R ---
+  CodeBuildProjectR:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: "juiceshop-badanie-R"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-R.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !GetAtt ECRRepository.RepositoryUri
+      TimeoutInMinutes: 90
+
+  # --- Pipeline - wariant R ---
+  PipelineR:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: "juiceshop-badanie-R"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref GitHubConnection
+                FullRepositoryId: !Ref GitHubRepositoryId
+                BranchName: !Ref BranchNameR
+                # KRYTYCZNE dla Gitleaks (SEC-05) - bez tego CodePipeline dostarcza
+                # ZIP bez historii .git, sekret w historii staje sie niewykrywalny
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildR
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectR
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildROutput
+
+Outputs:
+  ECRRepositoryUri:
+    Value: !GetAtt ECRRepository.RepositoryUri
+  PipelineName:
+    Value: !Ref PipelineK
+  ConnectionArn:
+    Value: !Ref GitHubConnection
+    Description: >
+      WAŻNE: po utworzeniu stacku ten connection ma status PENDING.
+      Wejdź w konsoli AWS: Developer Tools > Settings > Connections,
+      znajdź "juiceshop-badanie-github" i kliknij "Update pending connection"
+      żeby dokończyć autoryzację OAuth do GitHub. Pipeline nie ruszy bez tego.
