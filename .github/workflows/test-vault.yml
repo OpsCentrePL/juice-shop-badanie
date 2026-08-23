@@ -373,16 +373,17 @@ jobs:
         run: rm -f /tmp/kubeconfig
 
   # ============================ TESTOWANIE DAST ============================
+    # ============================ TESTOWANIE DAST ============================
   zap-krzyzowy:
     runs-on: [self-hosted, Linux, X64]
     needs: [srodowisko-efemeryczne]
-    timeout-minutes: 10
+    timeout-minutes: 30
     continue-on-error: true
     container:
       image: zaproxy/zap-stable
       options: --user root --no-healthcheck
     steps:
-      - name: Skanowanie DAST przy użyciu OWASP ZAP Baseline
+      - name: Skanowanie DAST przy użyciu OWASP ZAP Full Scan
         id: zap
         shell: bash
         run: |
@@ -390,14 +391,11 @@ jobs:
 
           echo "Skanowanie: $DAST_TARGET_URL"
 
-          # Tworzymy wewnątrz kontenera katalog, do którego skrypt ZAP ma natywnie zapisywać raporty
           mkdir -p /zap/wrk
 
-          # Używamy pełnej bezwzględnej ścieżki do skryptu bazowego i włączamy tryb debug (-d)
           set +e
-          /zap/zap-baseline.py \
+          /zap/zap-full-scan.py \
             -t "$DAST_TARGET_URL" \
-            -a \
             -d \
             -J report.json \
             -w report.md \
@@ -408,7 +406,6 @@ jobs:
           echo "ZAP_EXIT_CODE=$ZAP_RC" >> "$GITHUB_ENV"
           echo "Kod zakończenia ZAP: $ZAP_RC"
 
-          # Przenosimy raporty bezpośrednio do GITHUB_WORKSPACE, aby następny krok poprawnie je wychwycił
           cp /zap/wrk/report.* "$GITHUB_WORKSPACE/" || true
 
           exit 0
