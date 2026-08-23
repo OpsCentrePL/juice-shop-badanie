@@ -10,6 +10,7 @@ version: 0.2
 # gitleaks:v8.22.1. Notation zamiast Cosign (roznica narzedziowa, nie blad).
 
 env:
+  git-credential-helper: yes
   secrets-manager:
     SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
     KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
