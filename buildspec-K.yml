@@ -61,7 +61,9 @@ phases:
       - docker push ${ECR_REPOSITORY_URI}:latest
       - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
       - 'echo "post_build phase - wdrozenie (zero kontroli, wariant K)"'
+      - 'kubectl -n $K8S_NAMESPACE create secret docker-registry ecr-pull-secret --docker-server=${ECR_REPOSITORY_URI%%/*} --docker-username=AWS --docker-password=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION) --dry-run=client -o yaml | kubectl apply -f -'
       - kubectl -n $K8S_NAMESPACE apply -f k8s/deployment.yaml
+      - 'kubectl -n $K8S_NAMESPACE patch deployment ${K8S_DEPLOYMENT_NAME} --type=strategic -p "{\"spec\":{\"template\":{\"spec\":{\"imagePullSecrets\":[{\"name\":\"ecr-pull-secret\"}]}}}}"'
       - kubectl -n $K8S_NAMESPACE set image deployment/${K8S_DEPLOYMENT_NAME} ${K8S_CONTAINER_NAME}=${ECR_REPOSITORY_URI}:${IMAGE_TAG}
       - kubectl -n $K8S_NAMESPACE rollout status deployment/${K8S_DEPLOYMENT_NAME} --timeout=180s
       - 'echo "post_build phase - gotowe, artefakt wdrozony"'
