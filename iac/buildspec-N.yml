@@ -1,0 +1,83 @@
+version: 0.2
+
+# WARIANT N (natywny) - sekcja 5 dokumentu badawczego.
+# Budowanie + push + podpis (AWS Signer/Notation, INT-01) + wdrozenie.
+# Inspector (ECR enhanced scanning), Security Hub, Config, Access Analyzer
+# dzialaja pasywnie/asynchronicznie w tle - wyniki zbierane OSOBNYM skryptem
+# po serii pomiarowej (nie blokuja czasu buildu, sa eventual-consistency).
+# SAST, DAST, wykrywanie sekretow - swiadomie NIEOBSLUGIWANE w N (H5).
+
+env:
+  secrets-manager:
+    SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
+    KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
+  variables:
+    SSH_HOST: "server.mikolajmurawski.pl"
+    SSH_USER: "mikolaj"
+    SSH_PORT: "22"
+    K8S_API_TARGET: "10.200.0.8:6443"
+    LOCAL_TUNNEL_PORT: "16443"
+    K8S_NAMESPACE: "badanie-prod"
+    K8S_DEPLOYMENT_NAME: "juice-shop"
+    K8S_CONTAINER_NAME: "juice-shop"
+    LEGACY_MONITORING_TOKEN: "glpat-a1B2c3D4e5F6g7H8i9J0"
+    SIGNER_PROFILE_ARN: "arn:aws:signer:eu-central-1:891377386127:/signing-profiles/juiceshop_badanie"
+
+phases:
+  install:
+    commands:
+      - 'echo "install phase - kubectl + przygotowanie SSH"'
+      - curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+      - mkdir -p ~/.ssh
+      - echo "$SSH_PRIVATE_KEY" > ~/.ssh/codebuild_deploy_key
+      - chmod 600 ~/.ssh/codebuild_deploy_key
+      - ssh-keyscan -4 -T 10 -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts || true
+      - 'test -s ~/.ssh/known_hosts && echo "known_hosts OK" || (echo "known_hosts pusty - blad" && exit 1)'
+      - 'echo "install phase - Notation CLI + AWS Signer plugin"'
+      - wget -q https://d2hvyiie56hcat.cloudfront.net/linux/amd64/installer/deb/latest/aws-signer-notation-cli_amd64.deb
+      - dpkg -i aws-signer-notation-cli_amd64.deb
+      - notation version
+
+  pre_build:
+    commands:
+      - 'echo "pre_build phase - logowanie do ECR"'
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - 'echo "pre_build phase - tunel SSH do klastra k8s"'
+      - ssh -4 -i ~/.ssh/codebuild_deploy_key -p $SSH_PORT -f -N -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -L ${LOCAL_TUNNEL_PORT}:${K8S_API_TARGET} ${SSH_USER}@${SSH_HOST}
+      - sleep 3
+      - echo "$KUBECONFIG_CONTENT" > kubeconfig-aws.yaml
+      - sed -i "s#https://${K8S_API_TARGET}#https://127.0.0.1:${LOCAL_TUNNEL_PORT}#" kubeconfig-aws.yaml
+      - 'sed -i "s|certificate-authority-data:|tls-server-name: ${K8S_API_TARGET%%:*}\n    certificate-authority-data:|" kubeconfig-aws.yaml'
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - 'echo "pre_build phase - sanity check dostepu (namespaced, nie cluster-scope)"'
+      - kubectl -n $K8S_NAMESPACE auth can-i create deployments
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+      - echo "IMAGE_TAG=$IMAGE_TAG" > image_tag.env
+
+  build:
+    commands:
+      - 'echo "build phase - docker build --no-cache"'
+      - . ./image_tag.env
+      - docker build --no-cache -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest .
+
+  post_build:
+    commands:
+      - 'echo "post_build phase - push obrazu"'
+      - . ./image_tag.env
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - docker push ${ECR_REPOSITORY_URI}:latest
+      - 'echo "post_build phase - podpisywanie obrazu AWS Signer/Notation (INT-01)"'
+      - notation sign ${ECR_REPOSITORY_URI}:${IMAGE_TAG} --plugin "com.amazonaws.signer.notation.plugin" --id "${SIGNER_PROFILE_ARN}"
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - 'echo "post_build phase - wdrozenie"'
+      - 'kubectl -n $K8S_NAMESPACE create secret docker-registry ecr-pull-secret --docker-server=${ECR_REPOSITORY_URI%%/*} --docker-username=AWS --docker-password=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION) --dry-run=client -o yaml | kubectl apply -f -'
+      - kubectl -n $K8S_NAMESPACE apply -f k8s/deployment.yaml
+      - 'kubectl -n $K8S_NAMESPACE patch deployment ${K8S_DEPLOYMENT_NAME} --type=strategic -p "{\"spec\":{\"template\":{\"spec\":{\"imagePullSecrets\":[{\"name\":\"ecr-pull-secret\"}]}}}}"'
+      - kubectl -n $K8S_NAMESPACE set image deployment/${K8S_DEPLOYMENT_NAME} ${K8S_CONTAINER_NAME}=${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - kubectl -n $K8S_NAMESPACE rollout status deployment/${K8S_DEPLOYMENT_NAME} --timeout=180s
+      - 'echo "post_build phase - gotowe, artefakt podpisany i wdrozony"'
+
+artifacts:
+  files:
+    - image_tag.env
