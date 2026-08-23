@@ -1,363 +1,129 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  Badanie DevSecOps AWS - pipeline wariantu K (kontrolny).
-  CodePipeline + CodeBuild + ECR + CodeConnections.
-  Sekrety (klucz SSH, kubeconfig) tworzone RĘCZNIE poza tym stackiem (Secrets Manager)
-  - patrz README.md. Ten stack tylko nadaje IAM uprawnienia do ich odczytu.
+version: 0.2
 
-Parameters:
-  GitHubRepositoryId:
-    Type: String
-    Default: "OpsCentrePL/juice-shop-badanie"
-    Description: "owner/repo z sekcji 0 dokumentu badawczego"
-  BranchName:
-    Type: String
-    Default: "main"
-    Description: "Gałąź do zbudowania - patrz sekcja 0: main lub badanie/aws-*"
-  BranchNameN:
-    Type: String
-    Default: "badanie/aws-n"
-    Description: "Gałąź dla wariantu N"
-  BranchNameR:
-    Type: String
-    Default: "badanie/aws-r"
-    Description: "Gałąź dla wariantu R"
+# WARIANT R (referencyjny) - sekcja 5 dokumentu badawczego.
+# Architektura zgodna z wariantem R na GitLab: statyczne skany -> build+push ->
+# podpis+SBOM -> WDROZENIE EFEMERYCZNE (wlasna domena+TLS) -> ZAP aktywny na
+# zywej aplikacji -> SPRZATANIE efemerycznego -> brama integralnosci (notation
+# verify). Pomiar konczy sie na bramce - bez wdrozenia produkcyjnego (poza
+# zakresem pomiaru, tak jak "wdrozenie: when manual" na GitLab).
+# Wersje TAKIE SAME jak GitHub/GitLab: trivy:0.58.1, semgrep:1.97.0,
+# gitleaks:v8.22.1. Notation zamiast Cosign (roznica narzedziowa, nie blad).
 
-Resources:
+env:
+  secrets-manager:
+    SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
+    KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
+  variables:
+    SSH_HOST: "server.mikolajmurawski.pl"
+    SSH_USER: "mikolaj"
+    SSH_PORT: "22"
+    K8S_API_TARGET: "10.200.0.8:6443"
+    LOCAL_TUNNEL_PORT: "16443"
+    K8S_NAMESPACE_EFEMERYCZNY: "badanie-efemeryczne"
+    LEGACY_MONITORING_TOKEN: "glpat-a1B2c3D4e5F6g7H8i9J0"
+    SIGNER_PROFILE_ARN: "arn:aws:signer:eu-central-1:891377386127:/signing-profiles/juiceshop_badanie"
 
-  # --- Artefakty pipeline'u (wymagane przez CodePipeline) ---
-  ArtifactBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub "juiceshop-badanie-artifacts-${AWS::AccountId}"
-      VersioningConfiguration:
-        Status: Enabled
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
+phases:
+  install:
+    commands:
+      - 'echo "install phase - kubectl + przygotowanie SSH"'
+      - curl -sLO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      - chmod +x kubectl && mv kubectl /usr/local/bin/kubectl
+      - mkdir -p ~/.ssh
+      - echo "$SSH_PRIVATE_KEY" > ~/.ssh/codebuild_deploy_key
+      - chmod 600 ~/.ssh/codebuild_deploy_key
+      - ssh-keyscan -4 -T 10 -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts || true
+      - 'test -s ~/.ssh/known_hosts && echo "known_hosts OK" || (echo "known_hosts pusty - blad" && exit 1)'
+      - 'echo "install phase - Notation CLI + AWS Signer plugin"'
+      - wget -q https://d2hvyiie56hcat.cloudfront.net/linux/amd64/installer/deb/latest/aws-signer-notation-cli_amd64.deb
+      - dpkg -i aws-signer-notation-cli_amd64.deb
+      - notation version
+      - 'echo "install phase - trust policy dla notation verify (bramka integralnosci)"'
+      - 'echo "{\"version\":\"1.0\",\"trustPolicies\":[{\"name\":\"aws-signer-tp\",\"registryScopes\":[\"*\"],\"signatureVerification\":{\"level\":\"strict\"},\"trustStores\":[\"signingAuthority:aws-signer-ts\"],\"trustedIdentities\":[\"${SIGNER_PROFILE_ARN}\"]}]}" > trustpolicy.json'
+      - notation policy import trustpolicy.json
+      - 'echo "install phase - Syft (SBOM)"'
+      - curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+      - syft version
 
-  # --- Rejestr obrazów ---
-  ECRRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: "juiceshop-badanie"
-      ImageScanningConfiguration:
-        ScanOnPush: true   # to jest Amazon Inspector / ECR enhanced scanning - patrz wariant N
+  pre_build:
+    commands:
+      - 'echo "pre_build phase - pelna historia git (wymagane dla Gitleaks - SEC-05)"'
+      - git rev-parse --is-shallow-repository
+      - git fetch --unshallow || echo "juz pelna historia lub fetch niepotrzebny"
+      - git log --oneline | wc -l
+      - 'echo "pre_build phase - logowanie do ECR"'
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - 'echo "pre_build phase - tunel SSH do k8s API"'
+      - ssh -4 -i ~/.ssh/codebuild_deploy_key -p $SSH_PORT -f -N -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes -L ${LOCAL_TUNNEL_PORT}:${K8S_API_TARGET} ${SSH_USER}@${SSH_HOST}
+      - sleep 3
+      - echo "$KUBECONFIG_CONTENT" > kubeconfig-aws.yaml
+      - sed -i "s#https://${K8S_API_TARGET}#https://127.0.0.1:${LOCAL_TUNNEL_PORT}#" kubeconfig-aws.yaml
+      - 'sed -i "s|certificate-authority-data:|tls-server-name: ${K8S_API_TARGET%%:*}\n    certificate-authority-data:|" kubeconfig-aws.yaml'
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - 'echo "pre_build phase - sanity check dostepu do namespace efemerycznego"'
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY auth can-i create deployments
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY auth can-i create ingresses
+      - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+      - echo "IMAGE_TAG=$IMAGE_TAG" > image_tag.env
+      - 'echo "pre_build phase - Semgrep (SAST)"'
+      - 'docker run --rm -v $(pwd):/src semgrep/semgrep:1.97.0 semgrep --config=p/security-audit --config=p/owasp-top-ten --sarif -o /src/semgrep-report.sarif /src || echo "semgrep zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "pre_build phase - Gitleaks (sekrety, pelna historia)"'
+      - 'docker run --rm -v $(pwd):/repo zricethezav/gitleaks:v8.22.1 detect --source=/repo --report-format=json --report-path=/repo/gitleaks-report.json --no-banner || echo "gitleaks zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "pre_build phase - Trivy config (IaC)"'
+      - 'docker run --rm -v $(pwd):/src aquasec/trivy:0.58.1 config --format json --output /src/trivy-config-report.json /src || echo "trivy config zakonczony"'
 
-  # --- Połączenie z GitHub (wymaga jednorazowej autoryzacji w konsoli AWS!) ---
-  GitHubConnection:
-    Type: AWS::CodeStarConnections::Connection
-    Properties:
-      ConnectionName: "juiceshop-badanie-github"
-      ProviderType: GitHub
+  build:
+    commands:
+      - 'echo "build phase - docker build --no-cache"'
+      - . ./image_tag.env
+      - docker build --no-cache -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -t ${ECR_REPOSITORY_URI}:latest .
 
-  # --- Rola CodeBuild ---
-  CodeBuildServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: "juiceshop-codebuild-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codebuild.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: juiceshop-codebuild-policy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Sid: Logs
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "*"
-              - Sid: ArtifactBucket
-                Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:GetBucketAcl
-                  - s3:GetBucketLocation
-                Resource:
-                  - !GetAtt ArtifactBucket.Arn
-                  - !Sub "${ArtifactBucket.Arn}/*"
-              - Sid: ECRAuth
-                Effect: Allow
-                Action:
-                  - ecr:GetAuthorizationToken
-                Resource: "*"
-              - Sid: ECRPush
-                Effect: Allow
-                Action:
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:BatchGetImage
-                  - ecr:PutImage
-                  - ecr:InitiateLayerUpload
-                  - ecr:UploadLayerPart
-                  - ecr:CompleteLayerUpload
-                  - ecr:DescribeImages
-                Resource: !GetAtt ECRRepository.Arn
-              - Sid: Secrets
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource:
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:juiceshop/codebuild-ssh-key-*"
-                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:juiceshop/k8s-access-*"
-              # Poniższe będą potrzebne w wariancie N/R - zostawione tu żeby nie edytować roli ponownie
-              - Sid: FutureInspectorSecurityHub
-                Effect: Allow
-                Action:
-                  - inspector2:ListFindings
-                  - securityhub:BatchImportFindings
-                  - securityhub:GetFindings
-                Resource: "*"
-              - Sid: FutureSigner
-                Effect: Allow
-                Action:
-                  - signer:SignPayload
-                  - signer:GetRevocationStatus
-                  - signer:DescribeSigningJob
-                  - signer:GetSigningProfile
-                Resource: "*"
+  post_build:
+    commands:
+      - 'echo "post_build phase - push obrazu"'
+      - . ./image_tag.env
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - docker push ${ECR_REPOSITORY_URI}:latest
+      - 'echo "post_build phase - Trivy image (skan obrazu)"'
+      - 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/out aquasec/trivy:0.58.1 image --format json --output /out/trivy-image-report.json ${ECR_REPOSITORY_URI}:${IMAGE_TAG} || echo "trivy image zakonczony"'
+      - 'echo "post_build phase - Syft SBOM (CycloneDX)"'
+      - syft ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -o cyclonedx-json=sbom.cyclonedx.json
+      - 'echo "post_build phase - podpisywanie obrazu AWS Signer/Notation (INT-01)"'
+      - IMAGE_DIGEST=$(aws ecr describe-images --repository-name ${ECR_REPOSITORY_URI#*/} --image-ids imageTag=${IMAGE_TAG} --query 'imageDetails[0].imageDigest' --output text)
+      - notation sign ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST} --plugin "com.amazonaws.signer.notation.plugin" --id "${SIGNER_PROFILE_ARN}"
+      - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
+      - EFEMER_NAZWA=juice-shop-aws-${CODEBUILD_BUILD_NUMBER}
+      - EFEMER_DOMENA=owasp-aws-${CODEBUILD_BUILD_NUMBER}.opscentre.pl
+      - echo "EFEMER_NAZWA=$EFEMER_NAZWA" >> image_tag.env
+      - echo "EFEMER_DOMENA=$EFEMER_DOMENA" >> image_tag.env
+      - 'echo "post_build phase - srodowisko efemeryczne: sekret ECR"'
+      - 'kubectl -n $K8S_NAMESPACE_EFEMERYCZNY create secret docker-registry ecr-pull-secret --docker-server=${ECR_REPOSITORY_URI%%/*} --docker-username=AWS --docker-password=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION) --dry-run=client -o yaml | kubectl apply -f -'
+      - 'echo "post_build phase - srodowisko efemeryczne: deployment+service+ingress"'
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY create deployment ${EFEMER_NAZWA} --image=${ECR_REPOSITORY_URI}@${IMAGE_DIGEST}
+      - 'kubectl -n $K8S_NAMESPACE_EFEMERYCZNY patch deployment ${EFEMER_NAZWA} --type=json -p=''[{"op":"add","path":"/spec/template/spec/imagePullSecrets","value":[{"name":"ecr-pull-secret"}]}]'''
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY expose deployment ${EFEMER_NAZWA} --port=3000
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY create ingress ${EFEMER_NAZWA} --class=nginx --rule="${EFEMER_DOMENA}/*=${EFEMER_NAZWA}:3000,tls=opscentre-wildcard-tls"
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY annotate ingress ${EFEMER_NAZWA} nginx.ingress.kubernetes.io/backend-protocol=HTTP nginx.ingress.kubernetes.io/ssl-redirect="true"
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY rollout status deployment/${EFEMER_NAZWA} --timeout=180s
+      - 'echo "post_build phase - czekam az domena zacznie odpowiadac"'
+      - 'for i in $(seq 1 12); do curl -skf -o /dev/null "https://${EFEMER_DOMENA}/" && break || sleep 5; done'
+      - 'echo "post_build phase - OWASP ZAP aktywny skan (zap-full-scan.py) na srodowisku efemerycznym"'
+      - 'docker run --rm -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t https://${EFEMER_DOMENA}/ -J zap-report.json -r zap-report.html || echo "zap zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "post_build phase - sprzatanie srodowiska efemerycznego"'
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete ingress ${EFEMER_NAZWA} --ignore-not-found
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete service ${EFEMER_NAZWA} --ignore-not-found
+      - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete deployment ${EFEMER_NAZWA} --ignore-not-found
+      - 'echo "post_build phase - brama integralnosci (notation verify) - koniec pomiaru"'
+      - notation verify ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST}
+      - 'echo "post_build phase - gotowe: statyczne+obraz+DAST+podpis zweryfikowane, bez wdrozenia produkcyjnego (poza zakresem pomiaru)"'
 
-  # --- Projekt CodeBuild - wariant K ---
-  CodeBuildProjectK:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: "juiceshop-badanie-K"
-      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      Source:
-        Type: CODEPIPELINE
-        BuildSpec: buildspec-K.yml
-      Environment:
-        Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:7.0
-        PrivilegedMode: true   # wymagane do `docker build`
-        EnvironmentVariables:
-          - Name: ECR_REPOSITORY_URI
-            Value: !GetAtt ECRRepository.RepositoryUri
-      TimeoutInMinutes: 30
-
-  # --- Rola CodePipeline ---
-  CodePipelineServiceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: "juiceshop-codepipeline-role"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: codepipeline.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: juiceshop-codepipeline-policy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                  - s3:PutObject
-                  - s3:GetBucketVersioning
-                Resource:
-                  - !GetAtt ArtifactBucket.Arn
-                  - !Sub "${ArtifactBucket.Arn}/*"
-              - Effect: Allow
-                Action:
-                  - codestar-connections:UseConnection
-                Resource: !Ref GitHubConnection
-              - Effect: Allow
-                Action:
-                  - codebuild:StartBuild
-                  - codebuild:BatchGetBuilds
-                Resource:
-                  - !GetAtt CodeBuildProjectK.Arn
-                  - !GetAtt CodeBuildProjectN.Arn
-                  - !GetAtt CodeBuildProjectR.Arn
-
-  # --- Pipeline - wariant K ---
-  PipelineK:
-    Type: AWS::CodePipeline::Pipeline
-    Properties:
-      Name: "juiceshop-badanie-K"
-      RoleArn: !GetAtt CodePipelineServiceRole.Arn
-      ArtifactStore:
-        Type: S3
-        Location: !Ref ArtifactBucket
-      Stages:
-        - Name: Source
-          Actions:
-            - Name: Source
-              ActionTypeId:
-                Category: Source
-                Owner: AWS
-                Provider: CodeStarSourceConnection
-                Version: "1"
-              Configuration:
-                ConnectionArn: !Ref GitHubConnection
-                FullRepositoryId: !Ref GitHubRepositoryId
-                BranchName: !Ref BranchName
-              OutputArtifacts:
-                - Name: SourceOutput
-        - Name: Build
-          Actions:
-            - Name: BuildK
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: "1"
-              Configuration:
-                ProjectName: !Ref CodeBuildProjectK
-              InputArtifacts:
-                - Name: SourceOutput
-              OutputArtifacts:
-                - Name: BuildKOutput
-
-  # --- Projekt CodeBuild - wariant N ---
-  CodeBuildProjectN:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: "juiceshop-badanie-N"
-      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      Source:
-        Type: CODEPIPELINE
-        BuildSpec: buildspec-N.yml
-      Environment:
-        Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/standard:7.0
-        PrivilegedMode: true
-        EnvironmentVariables:
-          - Name: ECR_REPOSITORY_URI
-            Value: !GetAtt ECRRepository.RepositoryUri
-      TimeoutInMinutes: 30
-
-  # --- Pipeline - wariant N ---
-  PipelineN:
-    Type: AWS::CodePipeline::Pipeline
-    Properties:
-      Name: "juiceshop-badanie-N"
-      RoleArn: !GetAtt CodePipelineServiceRole.Arn
-      ArtifactStore:
-        Type: S3
-        Location: !Ref ArtifactBucket
-      Stages:
-        - Name: Source
-          Actions:
-            - Name: Source
-              ActionTypeId:
-                Category: Source
-                Owner: AWS
-                Provider: CodeStarSourceConnection
-                Version: "1"
-              Configuration:
-                ConnectionArn: !Ref GitHubConnection
-                FullRepositoryId: !Ref GitHubRepositoryId
-                BranchName: !Ref BranchNameN
-              OutputArtifacts:
-                - Name: SourceOutput
-        - Name: Build
-          Actions:
-            - Name: BuildN
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: "1"
-              Configuration:
-                ProjectName: !Ref CodeBuildProjectN
-              InputArtifacts:
-                - Name: SourceOutput
-              OutputArtifacts:
-                - Name: BuildNOutput
-
-  # --- Projekt CodeBuild - wariant R ---
-  CodeBuildProjectR:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: "juiceshop-badanie-R"
-      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
-      Artifacts:
-        Type: CODEPIPELINE
-      Source:
-        Type: CODEPIPELINE
-        BuildSpec: buildspec-R.yml
-      Environment:
-        Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_MEDIUM
-        Image: aws/codebuild/standard:7.0
-        PrivilegedMode: true
-        EnvironmentVariables:
-          - Name: ECR_REPOSITORY_URI
-            Value: !GetAtt ECRRepository.RepositoryUri
-      TimeoutInMinutes: 90
-
-  # --- Pipeline - wariant R ---
-  PipelineR:
-    Type: AWS::CodePipeline::Pipeline
-    Properties:
-      Name: "juiceshop-badanie-R"
-      RoleArn: !GetAtt CodePipelineServiceRole.Arn
-      ArtifactStore:
-        Type: S3
-        Location: !Ref ArtifactBucket
-      Stages:
-        - Name: Source
-          Actions:
-            - Name: Source
-              ActionTypeId:
-                Category: Source
-                Owner: AWS
-                Provider: CodeStarSourceConnection
-                Version: "1"
-              Configuration:
-                ConnectionArn: !Ref GitHubConnection
-                FullRepositoryId: !Ref GitHubRepositoryId
-                BranchName: !Ref BranchNameR
-                # KRYTYCZNE dla Gitleaks (SEC-05) - bez tego CodePipeline dostarcza
-                # ZIP bez historii .git, sekret w historii staje sie niewykrywalny
-                OutputArtifactFormat: CODEBUILD_CLONE_REF
-              OutputArtifacts:
-                - Name: SourceOutput
-        - Name: Build
-          Actions:
-            - Name: BuildR
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: "1"
-              Configuration:
-                ProjectName: !Ref CodeBuildProjectR
-              InputArtifacts:
-                - Name: SourceOutput
-              OutputArtifacts:
-                - Name: BuildROutput
-
-Outputs:
-  ECRRepositoryUri:
-    Value: !GetAtt ECRRepository.RepositoryUri
-  PipelineName:
-    Value: !Ref PipelineK
-  ConnectionArn:
-    Value: !Ref GitHubConnection
-    Description: >
-      WAŻNE: po utworzeniu stacku ten connection ma status PENDING.
-      Wejdź w konsoli AWS: Developer Tools > Settings > Connections,
-      znajdź "juiceshop-badanie-github" i kliknij "Update pending connection"
-      żeby dokończyć autoryzację OAuth do GitHub. Pipeline nie ruszy bez tego.
+artifacts:
+  files:
+    - image_tag.env
+    - semgrep-report.sarif
+    - gitleaks-report.json
+    - trivy-config-report.json
+    - trivy-image-report.json
+    - sbom.cyclonedx.json
+    - zap-report.json
+    - zap-report.html
