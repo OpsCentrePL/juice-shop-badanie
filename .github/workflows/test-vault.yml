@@ -397,6 +397,11 @@ jobs:
             -w report.md \
             -r report.html
           ZAP_RC=$?
+          set -e
+          echo "ZAP_EXIT_CODE=$ZAP_RC" >> "$GITHUB_ENV"
+          echo "Kod zakończenia ZAP: $ZAP_RC"
+          cp /zap/wrk/report.* "$GITHUB_WORKSPACE/" || true
+          exit 0
 
       - name: Zapisz raport ZAP
         if: always()
