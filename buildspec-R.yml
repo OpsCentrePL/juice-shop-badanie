@@ -10,10 +10,10 @@ version: 0.2
 # gitleaks:v8.22.1. Notation zamiast Cosign (roznica narzedziowa, nie blad).
 
 env:
-  git-credential-helper: yes
   secrets-manager:
     SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
     KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
+    GITHUB_TOKEN: "juiceshop/github-pat2:token"
   variables:
     SSH_HOST: "server.mikolajmurawski.pl"
     SSH_USER: "mikolaj"
@@ -48,10 +48,9 @@ phases:
 
   pre_build:
     commands:
-      - 'echo "pre_build phase - pelna historia git (wymagane dla Gitleaks - SEC-05)"'
-      - git rev-parse --is-shallow-repository
-      - git fetch --unshallow || echo "juz pelna historia lub fetch niepotrzebny"
-      - git log --oneline | wc -l
+      - 'echo "pre_build phase - wlasny pelny clone (Gitleaks - SEC-05), token przez credential helper, nigdy w URL/logach"'
+      - 'git -c credential.helper="!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f" clone --branch badanie/aws-r --single-branch https://github.com/OpsCentrePL/juice-shop-badanie.git full-repo-clone'
+      - cd full-repo-clone && git log --oneline | wc -l && cd ..
       - 'echo "pre_build phase - logowanie do ECR"'
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
       - 'echo "pre_build phase - tunel SSH do k8s API"'
@@ -68,8 +67,9 @@ phases:
       - echo "IMAGE_TAG=$IMAGE_TAG" > image_tag.env
       - 'echo "pre_build phase - Semgrep (SAST)"'
       - 'docker run --rm -v $(pwd):/src semgrep/semgrep:1.97.0 semgrep --config=p/security-audit --config=p/owasp-top-ten --sarif -o /src/semgrep-report.sarif /src || echo "semgrep zakonczony (kod niezerowy = znaleziska, nie blad)"'
-      - 'echo "pre_build phase - Gitleaks (sekrety, pelna historia)"'
-      - 'docker run --rm -v $(pwd):/repo zricethezav/gitleaks:v8.22.1 detect --source=/repo --report-format=json --report-path=/repo/gitleaks-report.json --no-banner || echo "gitleaks zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "pre_build phase - Gitleaks (sekrety, pelna historia z osobnego clone)"'
+      - 'docker run --rm -v $(pwd)/full-repo-clone:/repo zricethezav/gitleaks:v8.22.1 detect --source=/repo --report-format=json --report-path=/repo/gitleaks-report.json --no-banner || echo "gitleaks zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - cp full-repo-clone/gitleaks-report.json . || echo "brak raportu do skopiowania"
       - 'echo "pre_build phase - Trivy config (IaC)"'
       - 'docker run --rm -v $(pwd):/src aquasec/trivy:0.58.1 config --format json --output /src/trivy-config-report.json /src || echo "trivy config zakonczony"'
 
