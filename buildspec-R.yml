@@ -86,7 +86,7 @@ phases:
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
       - docker push ${ECR_REPOSITORY_URI}:latest
       - 'echo "post_build phase - Trivy image (skan obrazu)"'
-      - 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/out aquasec/trivy:0.58.1 image --format json --output /out/trivy-image-report.json ${ECR_REPOSITORY_URI}:${IMAGE_TAG} || echo "trivy image zakonczony"'
+      - 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/out aquasec/trivy:0.58.1 image --timeout 15m --format json --output /out/trivy-image-report.json ${ECR_REPOSITORY_URI}:${IMAGE_TAG} || echo "trivy image zakonczony"'
       - 'echo "post_build phase - Syft SBOM (CycloneDX)"'
       - syft ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -o cyclonedx-json=sbom.cyclonedx.json
       - 'echo "post_build phase - podpisywanie obrazu AWS Signer/Notation (INT-01)"'
@@ -109,7 +109,7 @@ phases:
       - 'echo "post_build phase - czekam az domena zacznie odpowiadac"'
       - 'for i in $(seq 1 12); do curl -skf -o /dev/null "https://${EFEMER_DOMENA}/" && break || sleep 5; done'
       - 'echo "post_build phase - OWASP ZAP aktywny skan (zap-full-scan.py) na srodowisku efemerycznym"'
-      - 'docker run --rm -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t https://${EFEMER_DOMENA}/ -J zap-report.json -r zap-report.html || echo "zap zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'docker run --rm --user root -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t https://${EFEMER_DOMENA}/ -J zap-report.json -r zap-report.html || echo "zap zakonczony (kod niezerowy = znaleziska, nie blad)"'
       - 'echo "post_build phase - sprzatanie srodowiska efemerycznego"'
       - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete ingress ${EFEMER_NAZWA} --ignore-not-found
       - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete service ${EFEMER_NAZWA} --ignore-not-found
