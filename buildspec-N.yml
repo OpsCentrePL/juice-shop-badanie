@@ -12,9 +12,9 @@ env:
     SSH_PRIVATE_KEY: "juiceshop/codebuild-ssh-key:private_key"
     KUBECONFIG_CONTENT: "juiceshop/k8s-access:kubeconfig"
   variables:
-    SSH_HOST: "server.mikolajmurawski.pl"
-    SSH_USER: "mikolaj"
-    SSH_PORT: "22"
+    SSH_HOST: "server-01.contabo.opscentre.pl"
+    SSH_USER: "user"
+    SSH_PORT: "2222"
     K8S_API_TARGET: "10.200.0.8:6443"
     LOCAL_TUNNEL_PORT: "16443"
     K8S_NAMESPACE: "badanie-prod"
