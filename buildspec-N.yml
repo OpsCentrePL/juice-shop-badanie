@@ -70,6 +70,11 @@ phases:
       - 'echo "post_build phase - podpisywanie obrazu AWS Signer/Notation (INT-01)"'
       - IMAGE_DIGEST=$(aws ecr describe-images --repository-name ${ECR_REPOSITORY_URI#*/} --image-ids imageTag=${IMAGE_TAG} --query 'imageDetails[0].imageDigest' --output text)
       - notation sign ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST} --plugin "com.amazonaws.signer.notation.plugin" --id "${SIGNER_PROFILE_ARN}"
+      - 'echo "post_build phase - trust policy dla notation verify (bramka integralnosci)"'
+      - 'echo "{\"version\":\"1.0\",\"trustPolicies\":[{\"name\":\"aws-signer-tp\",\"registryScopes\":[\"*\"],\"signatureVerification\":{\"level\":\"strict\"},\"trustStores\":[\"signingAuthority:aws-signer-ts\"],\"trustedIdentities\":[\"${SIGNER_PROFILE_ARN}\"]}]}" > trustpolicy.json'
+      - notation policy import trustpolicy.json
+      - 'echo "post_build phase - brama integralnosci (notation verify) PRZED wdrozeniem"'
+      - notation verify ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST}
       - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
       - 'echo "post_build phase - wdrozenie"'
       - 'kubectl -n $K8S_NAMESPACE create secret docker-registry ecr-pull-secret --docker-server=${ECR_REPOSITORY_URI%%/*} --docker-username=AWS --docker-password=$(aws ecr get-login-password --region $AWS_DEFAULT_REGION) --dry-run=client -o yaml | kubectl apply -f -'
