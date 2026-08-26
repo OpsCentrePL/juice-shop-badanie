@@ -66,12 +66,18 @@ phases:
       - IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
       - echo "IMAGE_TAG=$IMAGE_TAG" > image_tag.env
       - 'echo "pre_build phase - Semgrep (SAST)"'
+      - T0_semgrep=$(date +%s%3N)
       - 'docker run --rm -v $(pwd):/src semgrep/semgrep:1.97.0 semgrep --config=p/security-audit --config=p/owasp-top-ten --sarif -o /src/semgrep-report.sarif /src || echo "semgrep zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "CZAS_semgrep_ms=$(( $(date +%s%3N) - T0_semgrep ))" >> czasy_narzedzi.txt'
       - 'echo "pre_build phase - Gitleaks (sekrety, pelna historia z osobnego clone)"'
+      - T0_gitleaks=$(date +%s%3N)
       - 'docker run --rm -v $(pwd)/full-repo-clone:/repo zricethezav/gitleaks:v8.22.1 detect --source=/repo --report-format=json --report-path=/repo/gitleaks-report.json --no-banner || echo "gitleaks zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "CZAS_gitleaks_ms=$(( $(date +%s%3N) - T0_gitleaks ))" >> czasy_narzedzi.txt'
       - cp full-repo-clone/gitleaks-report.json . || echo "brak raportu do skopiowania"
       - 'echo "pre_build phase - Trivy config (IaC)"'
+      - T0_trivy_config=$(date +%s%3N)
       - 'docker run --rm -v $(pwd):/src aquasec/trivy:0.58.1 config --format json --output /src/trivy-config-report.json /src || echo "trivy config zakonczony"'
+      - 'echo "CZAS_trivy_config_ms=$(( $(date +%s%3N) - T0_trivy_config ))" >> czasy_narzedzi.txt'
 
   build:
     commands:
@@ -86,12 +92,18 @@ phases:
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
       - docker push ${ECR_REPOSITORY_URI}:latest
       - 'echo "post_build phase - Trivy image (skan obrazu)"'
+      - T0_trivy_image=$(date +%s%3N)
       - 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/out aquasec/trivy:0.58.1 image --timeout 15m --format json --output /out/trivy-image-report.json ${ECR_REPOSITORY_URI}:${IMAGE_TAG} || echo "trivy image zakonczony"'
+      - 'echo "CZAS_trivy_image_ms=$(( $(date +%s%3N) - T0_trivy_image ))" >> czasy_narzedzi.txt'
       - 'echo "post_build phase - Syft SBOM (CycloneDX)"'
+      - T0_syft=$(date +%s%3N)
       - syft ${ECR_REPOSITORY_URI}:${IMAGE_TAG} -o cyclonedx-json=sbom.cyclonedx.json
+      - 'echo "CZAS_syft_ms=$(( $(date +%s%3N) - T0_syft ))" >> czasy_narzedzi.txt'
       - 'echo "post_build phase - podpisywanie obrazu AWS Signer/Notation (INT-01)"'
       - IMAGE_DIGEST=$(aws ecr describe-images --repository-name ${ECR_REPOSITORY_URI#*/} --image-ids imageTag=${IMAGE_TAG} --query 'imageDetails[0].imageDigest' --output text)
+      - T0_notation_sign=$(date +%s%3N)
       - notation sign ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST} --plugin "com.amazonaws.signer.notation.plugin" --id "${SIGNER_PROFILE_ARN}"
+      - 'echo "CZAS_notation_sign_ms=$(( $(date +%s%3N) - T0_notation_sign ))" >> czasy_narzedzi.txt'
       - export KUBECONFIG=$PWD/kubeconfig-aws.yaml
       - EFEMER_NAZWA=juice-shop-aws-${CODEBUILD_BUILD_NUMBER}
       - EFEMER_DOMENA=owasp-aws-${CODEBUILD_BUILD_NUMBER}.opscentre.pl
@@ -109,18 +121,24 @@ phases:
       - 'echo "post_build phase - czekam az domena zacznie odpowiadac"'
       - 'for i in $(seq 1 12); do curl -skf -o /dev/null "https://${EFEMER_DOMENA}/" && break || sleep 5; done'
       - 'echo "post_build phase - OWASP ZAP aktywny skan (zap-full-scan.py) na srodowisku efemerycznym"'
+      - T0_zap=$(date +%s%3N)
       - 'docker run --rm --user root -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py -t https://${EFEMER_DOMENA}/ -J zap-report.json -r zap-report.html || echo "zap zakonczony (kod niezerowy = znaleziska, nie blad)"'
+      - 'echo "CZAS_zap_ms=$(( $(date +%s%3N) - T0_zap ))" >> czasy_narzedzi.txt'
       - 'echo "post_build phase - sprzatanie srodowiska efemerycznego"'
       - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete ingress ${EFEMER_NAZWA} --ignore-not-found
       - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete service ${EFEMER_NAZWA} --ignore-not-found
       - kubectl -n $K8S_NAMESPACE_EFEMERYCZNY delete deployment ${EFEMER_NAZWA} --ignore-not-found
       - 'echo "post_build phase - brama integralnosci (notation verify) - koniec pomiaru"'
+      - T0_notation_verify=$(date +%s%3N)
       - notation verify ${ECR_REPOSITORY_URI}@${IMAGE_DIGEST}
+      - 'echo "CZAS_notation_verify_ms=$(( $(date +%s%3N) - T0_notation_verify ))" >> czasy_narzedzi.txt'
+      - cat czasy_narzedzi.txt
       - 'echo "post_build phase - gotowe: statyczne+obraz+DAST+podpis zweryfikowane, bez wdrozenia produkcyjnego (poza zakresem pomiaru)"'
 
 artifacts:
   files:
     - image_tag.env
+    - czasy_narzedzi.txt
     - semgrep-report.sarif
     - gitleaks-report.json
     - trivy-config-report.json
